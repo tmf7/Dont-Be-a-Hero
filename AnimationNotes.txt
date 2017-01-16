@@ -1,0 +1,12 @@
+--Make moving entities bob slightly in the y-direction when walking
+
+--Flip an entity image left or right depending on movement direction
+	--if moving up, then maintain most recent flip
+
+--Rotate a dead entity 90 degrees and color-blend it gray
+
+--color-blend struck entities red in a flashing fashion
+
+--color-blend over-fatigued Goodman blue in a flashing fashion (until fatigue is full)
+
+--no explosions, no knockback
