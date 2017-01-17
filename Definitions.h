@@ -15,5 +15,6 @@
 #include <unordered_map>
 #include <array>
 #include <algorithm>
+#include <queue>
 
 #endif /* DBAH_DEFINITIONS_H */

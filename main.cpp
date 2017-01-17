@@ -104,10 +104,19 @@ int entityGUID = 0;
 
 // GridCell_t
 typedef struct GridCell_s {
+	// pathfinding
+	GridCell_s * parent;		// originating cell to set the path back from the goal
+	int gCost = 0;				// distance from start cell to this cell
+	int hCost = 0;				// distance from this cell to goal
+	int fCost = 0;				// sum of gCost and hCost
+	int gridRow;				// index within gameGrid
+	int gridCol;				// index within gameGrid
+
 	bool solid;												// triggers collision
 	SDL_Rect bounds;										// world location and cell size
 	std::vector<std::shared_ptr<GameObject_t>> contents;	// items, monsters, terrain/obstacles, or Goodman
 } GridCell_t;
+
 
 // grid dimensions
 const SDL_Point	defaultGridOrigin = { 0, 0 };
@@ -259,6 +268,8 @@ bool BuildGrid() {
 	// and copy the grid to the gridTexture for faster drawing
 	for (int row = 0; row < gridRows; row++) {
 		for (int col = 0; col < gridCols; col++) {
+			gameGrid.cells[row][col].gridRow = row;
+			gameGrid.cells[row][col].gridCol = col;
 			SDL_Rect & targetCell = gameGrid.cells[row][col].bounds;
 			targetCell = { row * cellSize,  col * cellSize, cellSize, cellSize };
 			DrawRect(targetCell, transparentGray, false);
@@ -514,6 +525,122 @@ bool InitGame(std::string & message) {
 }
 
 //***************
+// GetDistance
+//***************
+int GetDistance(GridCell_t * start, GridCell_t * end) {
+	int rowDist = SDL_abs(start->gridRow - end->gridRow);
+	int colDist = SDL_abs(start->gridCol - end->gridCol);
+
+	if (rowDist > colDist)
+		return (14 * colDist + 10 * (rowDist - colDist));
+	return (14 * rowDist + 10 * (colDist - rowDist));
+}
+
+
+//***************
+// Search
+//***************
+bool Search(const std::vector<GridCell_t *> & vector, const GridCell_t * target) {
+	for (auto && cell : vector)
+		if (cell == target)
+			return true;
+	return false;
+}
+
+std::vector<GridCell_t *> forwardPath;		// DEBUG: testing pathfinding
+
+//***************
+// PathFind
+// A* search of gameGrid cells
+// only searches static non-solid geometry
+// entities will perform dynamic collision avoidance on the fly
+//***************
+void PathFind(std::shared_ptr<GameObject_t> entity, SDL_Point & goal) {
+	auto cmp = [](auto && a, auto && b) { 
+		if (a->fCost > b->fCost)
+			return true;
+		else if (a->fCost == b->fCost)
+			return a->hCost > b->hCost;
+		return false;
+	};
+
+	std::vector<GridCell_t *> openSet;
+	std::vector<GridCell_t *> closedSet;
+	
+	GridCell_t * startCell = &gameGrid.cells[entity->origin.x / cellSize][entity->origin.y / cellSize];
+	GridCell_t * endCell = &gameGrid.cells[goal.x / cellSize][goal.y / cellSize];
+
+	if (endCell->solid)
+		return;
+
+	openSet.push_back(startCell);
+	while (openSet.size() > 0) {
+		std::make_heap(openSet.begin(), openSet.end(), cmp);		// heapify by fCost and hCost
+		auto currentCell = openSet.front();							// copy the lowest cost cell pointer
+		openSet.erase(openSet.begin());								// remove from openSet
+		closedSet.push_back(currentCell);							// add to closedSet using the bounds as the hashkey
+
+		if (currentCell == endCell) {								// check if the path is complete
+			std::vector<GridCell_t *> reversePath;
+			while (currentCell != startCell) {						// build the path back (reverse iterator)
+				reversePath.push_back(currentCell);
+				currentCell = currentCell->parent;
+			}
+			forwardPath = std::vector<GridCell_t *>(reversePath.rbegin(), reversePath.rend());
+			break;
+		}
+
+		// traverse the current cell's neighbors
+		// updating costs and adding to the openSet as needed 
+		// DEBUG: avoid the cell itself, offmap cells, collision cells, and closedSet cells, respectively
+		for (int row = -1; row <= 1; row++) {
+			for (int col = -1; col <= 1; col++) {
+				int nRow = currentCell->gridRow + row;
+				int nCol = currentCell->gridCol + col;
+				
+				// check for invalid neighbors
+				if ((row == 0 && col == 0) ||
+					(nRow < 0 || nRow >= gridRows || nCol < 0 || nCol >= gridCols) ||
+					gameGrid.cells[nRow][nCol].solid ||
+					Search(closedSet, &gameGrid.cells[nRow][nCol])) {
+					continue;
+				}
+
+				// check for updated gCost or entirely new cell
+				GridCell_t * neighbor = &gameGrid.cells[nRow][nCol];
+				int gCost = currentCell->gCost + GetDistance(currentCell, neighbor);
+				if (gCost < neighbor->gCost || !Search(openSet, neighbor)) {
+					neighbor->gCost = gCost;
+					neighbor->hCost = GetDistance(neighbor, endCell);
+					neighbor->fCost = gCost + neighbor->hCost;
+					neighbor->parent = currentCell;
+
+					if (!Search(openSet, neighbor))
+						openSet.push_back(neighbor);
+				}
+			}
+		}
+	}
+}
+
+/*
+//***************
+// UpdateCollision
+//***************
+void UpdateCollision() {
+	// one at at time, such that the first entity's final position is resolved before the second entity moves
+	// to check for collision, then adjust its final position.
+	SDL_HasIntersection(NULL, NULL);						// if this does occur, then clip a line segment that travels
+	// from 
+	SDL_IntersectRectAndLine(NULL, NULL, NULL, NULL, NULL); // segment gets clipped in EITHER direction
+	// traverse all entities and add them to each grid cell their bounds is over (likely just one)
+	// similarly, add each cell under the entity bounds to the entity's list
+	// ultimately, each frame, traverse each entity that has MOVED (no bobbing in place) and check
+	// all the lists of cells it belongs to for any collision boxes (wall, goodman, monster, missile)
+}
+*/
+
+//***************
 // UpdateBob
 //***************
 void UpdateBob(std::shared_ptr<GameObject_t> entity) {
@@ -627,6 +754,9 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 		if (!beginSelection)
 			first = second;
 
+		// Test A* pathfinding
+		PathFind(entities[entityAtlas["goodman"]], second);
+
 		// begin drawing
 		SDL_RenderClear(renderer);
 
@@ -638,6 +768,10 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 
 		// draw the collision layer
 		DrawCollision();
+
+		for (auto && cell : forwardPath) {
+			DrawRect(cell->bounds, opaqueGreen, true);
+		}
 
 		// test entity bob
 		auto & test = entities[entityAtlas["goodman"]];
