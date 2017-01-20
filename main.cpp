@@ -8,6 +8,8 @@
 #include <Windows.h>
 #include "Definitions.h"
 
+//----------------------------------------BEGIN DATA STRUCTURES---------------------------------------//
+
 // rendering info
 SDL_Window * window;
 SDL_Renderer * renderer;
@@ -15,6 +17,22 @@ TTF_Font * font;
 const SDL_Color clearColor = { 128, 128, 128, 255 };
 const SDL_Color transparentGray = { 0, 0, 0, 64 };
 const SDL_Color opaqueGreen = { 0, 255, 0, 255 };
+const SDL_Color opaqueRed = { 255, 0, 0, 255 };
+
+// debugging info
+typedef enum {
+	DEBUG_DRAW_COLLISION = BIT(0),
+	DEBUG_DRAW_PATH = BIT(1)
+} DebugFlags_t;
+
+Uint16 debugState = DEBUG_DRAW_PATH;// DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH;
+
+//***************
+// DebugCheck
+//***************
+Uint16 DebugCheck(DebugFlags_t flag) {
+	return debugState & flag;
+}
 
 // map texture
 struct {
@@ -30,77 +48,8 @@ struct {
 	std::vector<SDL_Rect> frames;
 } spriteSheet;
 
-// GameObject_t
-typedef struct GameObject_s {
-	SDL_Point	origin;			// top-left of sprite image
-	SDL_Rect	bounds;			// world-position and size of collision box
-	int			speed;
-	SDL_Point	velocity;
-
-	int			bob;			// the illusion of walking
-	bool		bobMaxed;		// peak bob height, return to 0
-	Uint32		bobTime;		// delay between bob updates
-
-	int			facing;			// left or right to determine flip
-	int			health;			// health <= 0 rotates sprite 90 and color-blends gray, hit color-blends red
-	int			stamina;		// subtraction color-blends blue for a few frames, stamina <= 0 blinks blue until full
-	bool		damaged;
-	bool		fatigued;
-	Uint32		blinkTime;		// future point to stop color mod
-
-	std::string name;			// use: SDL_RenderCopy(	renderer,
-								//						spriteSheet.texture, 
-								//						spriteSheet.frames[tileSet.frameAtlas[spriteName]],
-								//						&dstRectSameSizeAsSrcFrameButDifferentXY);
-	GameObject_s() 
-		:	origin({0, 0}),
-			bounds({0, 0, 0, 0}),
-			speed(0),
-			velocity({0, 0}),
-			name("invalid"),
-			bob(0),
-			bobMaxed(false),
-			bobTime(0),
-			facing(false),
-			blinkTime(0),
-			health(0),
-			stamina(0),
-			damaged(false),
-			fatigued(false) {
-	};
-
-	GameObject_s(const SDL_Point & origin,  const std::string & name) 
-		:	origin(origin),
-			velocity({ 0, 0 }),
-			name(name),
-			bob(0),
-			bobMaxed(false),
-			bobTime(0),
-			facing(rand() % 2),
-			blinkTime(0),
-			damaged(false),
-			fatigued(false) {
-		bounds = {origin.x + 4, origin.y + 4, 8, 16 };
-		if (name == "goodman") {
-			health = 100;
-			stamina = 100;
-			speed = 4;
-		} else if (name.find(std::string("melee")) || name.find(std::string("ranged"))) {
-			health = 2;
-			stamina = -1;
-			speed = 2;
-		} else { // missile
-			health = 1;
-			stamina = -1;
-			speed = 3;
-		}
-	};
-} GameObject_t;
-
-// entities
-std::unordered_map<std::string, int> entityAtlas;		// entity lookup by name
-std::vector<std::shared_ptr<GameObject_t>> entities;	// all dynamically allocated game objects
-int entityGUID = 0;
+// forward declaration of GameObject_t
+typedef struct GameObject_s GameObject_t;
 
 // GridCell_t
 typedef struct GridCell_s {
@@ -111,20 +60,21 @@ typedef struct GridCell_s {
 	int fCost = 0;				// sum of gCost and hCost
 	int gridRow;				// index within gameGrid
 	int gridCol;				// index within gameGrid
+	bool inOpenSet = false;		// expidites PathFind openSet searches
+	bool inClosedSet = false;	// expidites PathFind closedSet searches
 
 	bool solid;												// triggers collision
 	SDL_Rect bounds;										// world location and cell size
-	std::vector<std::shared_ptr<GameObject_t>> contents;	// items, monsters, terrain/obstacles, or Goodman
+	SDL_Point center;										// cached bounds centerpoint for quicker pathfinding
+	std::vector<std::shared_ptr<GameObject_t>> contents;	// monsters, missiles, and/or Goodman
 } GridCell_t;
 
-
 // grid dimensions
-const SDL_Point	defaultGridOrigin = { 0, 0 };
-const int gameWidth		= 800;
-const int gameHeight	= 600;
-const int cellSize		= 16;	// 16x16 square cells
-const int gridRows		= gameWidth / cellSize;
-const int gridCols		= (gameHeight / cellSize) + 1;
+constexpr const int gameWidth		= 800;
+constexpr const int gameHeight		= 600;
+constexpr const int cellSize		= 16;	// 16x16 square cells
+constexpr const int gridRows		= gameWidth / cellSize;
+constexpr const int gridCols		= gameHeight / cellSize;
 
 // gameGrid
 struct {
@@ -134,6 +84,124 @@ struct {
 
 // selection
 std::vector<GridCell_t *> selection;	// all interior and border cells of selected area
+
+// ObjectType_t
+typedef enum {
+	OBJECTTYPE_INVALID = -1,
+	OBJECTTYPE_GOODMAN,
+	OBJECTTYPE_MELEE,
+	OBJECTTYPE_RANGED,
+	OBJECTTYPE_MISSILE
+} ObjectType_t;
+
+// GameObject_t
+typedef struct GameObject_s {
+	SDL_Point	origin;			// top-left of sprite image
+	SDL_Rect	bounds;			// world-position and size of collision box
+	int			speed;
+	float		velX;
+	float		velY;
+	float		centerX;		// center of the collision bounding box
+	float		centerY;		// center of the collision bounding box
+
+	int			bob;			// the illusion of walking
+	bool		bobMaxed;		// peak bob height, return to 0
+	Uint32		moveTime;		// delay between move updates
+
+	int			facing;			// left or right to determine flip
+	int			health;			// health <= 0 rotates sprite 90 and color-blends gray, hit color-blends red
+	int			stamina;		// subtraction color-blends blue for a few frames, stamina <= 0 blinks blue until full
+	bool		damaged;
+	bool		fatigued;
+	Uint32		blinkTime;		// future point to stop color mod
+
+	ObjectType_t	type;		// for faster Think calls
+	std::string		name;		// globally unique name (substring can be used for spriteSheet.frameAtlas)
+
+	SDL_Point *						currentWaypoint;
+	std::vector<GridCell_t *>		path;				// A* pathfinding results
+	
+
+	std::vector<GridCell_t *>	cells;	// currently occupied gameGrid.cells indexes (between 1 and 4)
+
+	GameObject_s() 
+		:	origin({0, 0}),
+			bounds({0, 0, 0, 0}),
+			centerX(0.0f),
+			centerY(0.0f),
+			speed(0),
+			velX(0),
+			velY(0),
+			name("invalid"),
+			bob(0),
+			bobMaxed(false),
+			moveTime(0),
+			facing(false),
+			blinkTime(0),
+			health(0),
+			stamina(0),
+			damaged(false),
+			fatigued(false),
+			type(OBJECTTYPE_INVALID) {
+			currentWaypoint = &origin;
+	};
+
+	GameObject_s(const SDL_Point & origin,  const std::string & name, ObjectType_t type) 
+		:	origin(origin),
+			velX(0),
+			velY(0),
+			name(name),
+			bob(0),
+			bobMaxed(false),
+			moveTime(0),
+			facing(rand() % 2),
+			blinkTime(0),
+			damaged(false),
+			fatigued(false),
+			type(type) {
+		currentWaypoint = &(this->origin);
+		bounds = {origin.x + 4, origin.y + 4, 8, 16 };
+		centerX = (float)bounds.x + (float)bounds.w / 2.0f;
+		centerY = (float)bounds.y + (float)bounds.h / 2.0f;
+		switch (type) {
+			case OBJECTTYPE_GOODMAN:
+				health = 100;
+				stamina = 100;
+				speed = 4;
+				break; 
+			case OBJECTTYPE_MELEE:
+			case OBJECTTYPE_RANGED: 
+				health = 2;
+				stamina = -1;
+				speed = 2;
+				break;
+			case OBJECTTYPE_MISSILE: 
+				health = 1;
+				stamina = -1;
+				speed = 3;
+				break;
+			default: 
+				health = 0;
+				stamina = 0;
+				speed = 0;
+				break;
+		}
+	};
+} GameObject_t;
+
+// entities
+std::unordered_map<std::string, int> entityAtlas;		// entity lookup by name
+std::vector<std::shared_ptr<GameObject_t>> entities;	// all dynamically allocated game objects
+int entityGUID = 0;
+
+// dynamic pathfinding
+typedef enum {
+	COUNTER_CLOCKWISE = false,
+	CLOCKWISE = true
+} RotationDirection_t;
+
+//----------------------------------------END DATA STRUCTURES---------------------------------------//
+//-------------------------------------BEGIN RENDERING FUNCTIONS------------------------------------//
 
 //***************
 // DrawRect
@@ -200,6 +268,14 @@ void DrawOutlineText(const char * text, const SDL_Point & location, const SDL_Co
 }
 
 //***************
+// DrawPath
+//***************
+void DrawPath(std::shared_ptr<GameObject_t> & entity) {
+	for (auto && cell : entity->path)
+		DrawRect(SDL_Rect{ cell->center.x, cell->center.y, 2, 2 }, opaqueGreen, true);
+}
+
+//***************
 // DrawEntities
 // TODO: set blinkTime, health, damaged, and fatigued elsewhere
 //***************
@@ -242,10 +318,19 @@ void DrawEntities() {
 								spriteSheet.defaultMod.r, 
 								spriteSheet.defaultMod.g, 
 								spriteSheet.defaultMod.b	);
-		DrawRect(entity->bounds, opaqueGreen, false);		
+
+		// draw collision box
+		if (DebugCheck(DEBUG_DRAW_COLLISION))
+			DrawRect(entity->bounds, opaqueGreen, false);
+
+		// draw path
+		if (DebugCheck(DEBUG_DRAW_PATH))
+			DrawPath(entity);
 	}
 }
 
+//------------------------------------------END RENDERING FUNCTIONS----------------------------------------//
+//-------------------------------------BEGIN INITIALIZATION FUNCTIONS--------------------------------------//
 
 //***************
 // BuildGrid
@@ -270,9 +355,10 @@ bool BuildGrid() {
 		for (int col = 0; col < gridCols; col++) {
 			gameGrid.cells[row][col].gridRow = row;
 			gameGrid.cells[row][col].gridCol = col;
-			SDL_Rect & targetCell = gameGrid.cells[row][col].bounds;
-			targetCell = { row * cellSize,  col * cellSize, cellSize, cellSize };
-			DrawRect(targetCell, transparentGray, false);
+			SDL_Rect & bounds = gameGrid.cells[row][col].bounds;
+			bounds = { row * cellSize,  col * cellSize, cellSize, cellSize };
+			gameGrid.cells[row][col].center = { bounds.x + (bounds.w / 2), bounds.y + (bounds.h / 2) };
+			DrawRect(bounds, transparentGray, false);
 		}
 	}
 
@@ -316,7 +402,6 @@ bool LoadCollision() {
 		}
 	}
 	read.close();
-
 	return true;
 }
 
@@ -411,6 +496,9 @@ bool LoadSprites() {
 	return true;
 }
 
+// forward declaration of UpdateCellReferences
+void UpdateCellReferences(std::shared_ptr<GameObject_t> & entity);
+
 //***************
 // SpawnGoodman
 //***************
@@ -421,32 +509,51 @@ void SpawnGoodman() {
 	int spawnCol = spawnY / cellSize;
 	// TODO: make this a random location in the grid (that isn't a collision tile)
 	std::string name = "goodman";
-	std::shared_ptr<GameObject_t> goodman = std::make_shared<GameObject_t>(SDL_Point{ spawnX, spawnY }, name);
+	std::shared_ptr<GameObject_t> goodman = std::make_shared<GameObject_t>(SDL_Point{ spawnX, spawnY }, name, OBJECTTYPE_GOODMAN);
 	entities.push_back(goodman);
 	entityAtlas[name] = entityGUID++;
-	gameGrid.cells[spawnRow][spawnCol].contents.push_back(goodman);
-	// TODO: traverse all entities each frame and update the cells each belongs to (more than one)
-	// ALSO update the gameGrid.cells.contents for fast collision checks
+	UpdateCellReferences(goodman);
 }
 
 //***************
 // SpawnMonsters
-// TODO: update this for multiple monsters
+// TODO: cluster spawn points in a region of the map farthest from Goodman
+// OR: potentially pick TWO  spawn points, then "animate" the monsters flooding in (which affects strategy)
+// TODO: make sure to update grid and monsters/goodman cell lists when spawning
 //***************
 void SpawnMonsters() {
-	int spawnX = 200;
-	int spawnY = 200;
-	int spawnRow = spawnX / cellSize;
-	int spawnCol = spawnY / cellSize;
-	// TODO: make this a random location in the grid (that isn't a collision tile) (and is farthest from goodman)
-	std::string name = "melee_";
-	name += std::to_string(entityGUID);
-	std::shared_ptr<GameObject_t> melee = std::make_shared<GameObject_t>(SDL_Point{ spawnX, spawnY }, name);
-	entities.push_back(melee);
-	entityAtlas[name] = entityGUID++;
-	gameGrid.cells[spawnRow][spawnCol].contents.push_back(melee);
-	// TODO: traverse all entities each frame and update the cells each belongs to (more than one)
-	// ALSO update the gameGrid.cells.contents for fast collision checks
+	// seed the random number generator
+	srand(SDL_GetTicks());
+
+	// a valid spawnpoint is not solid 
+	// and has no other gameobjects
+	for (int count = 0; count < 2; count++) {
+		
+		SDL_Point spawnPoint;
+		SDL_Point spawnCell;
+		do {
+			spawnPoint.x = rand() % gameWidth;					
+			spawnPoint.y = rand() % (gameHeight - cellSize);	// DEBUG: no grid row along bottom of the screen
+			spawnCell.x = spawnPoint.x / cellSize;				// FIXME(?): bounds check these row/col
+			spawnCell.y = spawnPoint.y / cellSize;
+		} while (	gameGrid.cells[spawnCell.x][spawnCell.y].solid ||
+					!gameGrid.cells[spawnCell.x][spawnCell.y].contents.empty()	);
+
+		// give it a type and name
+		ObjectType_t type = (ObjectType_t)((rand() % 2) + 1);
+		std::string name;
+		switch (type) {
+			case OBJECTTYPE_MELEE: name = "melee_"; break;
+			case OBJECTTYPE_RANGED: name = "ranged_"; break;
+		}
+		name += std::to_string(entityGUID);
+
+		// add it to the entity vector, entityAtlas, and gameGrid
+		std::shared_ptr<GameObject_t> monster = std::make_shared<GameObject_t>(spawnPoint, name, type);
+		entities.push_back(monster);
+		entityAtlas[name] = entityGUID++;
+		UpdateCellReferences(monster);
+	}
 }
 
 //***************
@@ -524,8 +631,26 @@ bool InitGame(std::string & message) {
 	return true;
 }
 
+//-------------------------------------END INITIALIZATION FUNCTIONS--------------------------------------//
+//-------------------------------------BEGIN PER-FRAME FUNCTIONS-----------------------------------------//
+
+//***************
+// RemoveObject
+// returns true on success, 
+// false otherwise
+//***************
+bool RemoveObject(const std::vector<std::shared_ptr<GameObject_t>> & vector, const std::shared_ptr<GameObject_t> & target) {
+	for (auto && object : vector) {
+		if (object == target) {
+			return true;
+		}
+	}
+	return false;
+}
+
 //***************
 // GetDistance
+// A* pathfinding utility
 //***************
 int GetDistance(GridCell_t * start, GridCell_t * end) {
 	int rowDist = SDL_abs(start->gridRow - end->gridRow);
@@ -536,27 +661,125 @@ int GetDistance(GridCell_t * start, GridCell_t * end) {
 	return (14 * rowDist + 10 * (colDist - rowDist));
 }
 
-
-//***************
-// Search
-//***************
-bool Search(const std::vector<GridCell_t *> & vector, const GridCell_t * target) {
-	for (auto && cell : vector)
-		if (cell == target)
-			return true;
-	return false;
-}
-
-std::vector<GridCell_t *> forwardPath;		// DEBUG: testing pathfinding
-
 //***************
 // PathFind
 // A* search of gameGrid cells
 // only searches static non-solid geometry
 // entities will perform dynamic collision avoidance on the fly
 //***************
-void PathFind(std::shared_ptr<GameObject_t> entity, SDL_Point & goal) {
-	auto cmp = [](auto && a, auto && b) { 
+bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Point & goal) {
+
+	// DEBUG: static to prevent excessive dynamic allocation
+	static std::vector<GridCell_t *> openSet;
+	static std::vector<GridCell_t *> closedSet;
+
+	int startRow = start.x / cellSize;
+	int startCol = start.y / cellSize;
+	int endRow = goal.x / cellSize;
+	int endCol = goal.y / cellSize;
+
+	// snap off-map start row/col
+	if (startRow < 0)
+		startRow = 0;
+	else if (startRow >= gridRows)
+		startRow = gridRows - 1;
+	if (startCol < 0)
+		startCol = 0;
+	else if (startCol >= gridCols)
+		startCol = gridCols - 1;
+
+	// snap off-map end row/col
+	if (endRow < 0)
+		endRow = 0;
+	else if (endRow >= gridRows)
+		endRow = gridRows - 1;
+	if (endCol < 0)
+		endCol = 0;
+	else if (endCol >= gridCols)
+		endCol = gridCols - 1;
+
+	GridCell_t * startCell = &gameGrid.cells[startRow][startCol];
+	GridCell_t * endCell = &gameGrid.cells[endRow][endCol];
+
+	if (endCell->solid || startCell == endCell) {
+		entity->path.clear();
+		entity->currentWaypoint = &entity->origin;
+		return false;
+	}
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// if the endCell is obstructed by a dynamic obstacle, 
+	// then floodfill for a nearby empty cell to set as the goal
+	if (!endCell->contents.empty() && !(endCell->contents.size() == 1 && endCell->contents[0] == entity)) {
+
+		// continue until there are no new neighbors to search
+		// DEBUG: this simple conditions works because my hard-coded map is all open areas
+		// DEBUG: however, there is an alternative where one searches one of several vectors
+		// containing cells paired according to color-codes indicating their pre-processed static reachability
+		closedSet.clear();
+		closedSet.push_back(endCell);
+		endCell->inClosedSet = true;
+		bool endCellUpdated = false;
+		size_t oldSetSize = 0;
+		while(oldSetSize < closedSet.size()) {
+			oldSetSize = closedSet.size();
+			auto & currentCell = closedSet.back();
+
+			// DEBUG: avoid the cell itself, offmap cells, solid cells, and closedSet cells, respectively
+			for (int row = -1; row <= 1; row++) {
+				for (int col = -1; col <= 1; col++) {
+					int nRow = currentCell->gridRow + row;
+					int nCol = currentCell->gridCol + col;
+
+					// check for invalid neighbors
+					if ((row == 0 && col == 0) ||
+						(nRow < 0 || nRow >= gridRows || nCol < 0 || nCol >= gridCols) ||
+						gameGrid.cells[nRow][nCol].solid ||
+						gameGrid.cells[nRow][nCol].inClosedSet) {
+						continue;
+					}
+
+					// attempt to update the endCell
+					GridCell_t * neighbor = &gameGrid.cells[nRow][nCol];
+					if (neighbor->contents.empty() || (neighbor->contents.size() == 1 && neighbor->contents[0] == entity)) {
+						endCell = neighbor;
+						endCellUpdated = true;
+						for (auto && cell : closedSet) {
+							cell->inClosedSet = false;
+						}
+						break;
+					} else {
+						closedSet.push_back(neighbor);
+						neighbor->inClosedSet = true;
+					}
+				}
+				if (endCellUpdated)
+					break;
+			}
+			if (endCellUpdated)
+				break;
+		}
+
+		// empty the non-traversable sub-section from startCell to endCell
+		// BUG(?): end variable is never path.end(), so it isn't checked for
+		if (!endCellUpdated) {
+			if (entity->path.size() > 1) {
+				auto & end = std::find(entity->path.begin(), entity->path.end(), startCell);
+				entity->path.erase(entity->path.begin(), end - 1);
+				entity->currentWaypoint = &entity->path.back()->center;
+			} else {
+				entity->currentWaypoint = &entity->origin;
+			}
+			return false;
+		} 
+	}
+/////////////////////////////////////////////////////////////////////////////////
+
+	openSet.clear();
+	closedSet.clear();
+
+	// openset sort priority: first by fCost, then by hCost 
+	auto cmp = [](auto && a, auto && b) {
 		if (a->fCost > b->fCost)
 			return true;
 		else if (a->fCost == b->fCost)
@@ -564,35 +787,72 @@ void PathFind(std::shared_ptr<GameObject_t> entity, SDL_Point & goal) {
 		return false;
 	};
 
-	std::vector<GridCell_t *> openSet;
-	std::vector<GridCell_t *> closedSet;
-	
-	GridCell_t * startCell = &gameGrid.cells[entity->origin.x / cellSize][entity->origin.y / cellSize];
-	GridCell_t * endCell = &gameGrid.cells[goal.x / cellSize][goal.y / cellSize];
-
-	if (endCell->solid)
-		return;
-
+	// pathfinding
+	startCell->inOpenSet = true;
 	openSet.push_back(startCell);
-	while (openSet.size() > 0) {
+	while (!openSet.empty()) {
 		std::make_heap(openSet.begin(), openSet.end(), cmp);		// heapify by fCost and hCost
 		auto currentCell = openSet.front();							// copy the lowest cost cell pointer
 		openSet.erase(openSet.begin());								// remove from openSet
+		currentCell->inOpenSet = false;
 		closedSet.push_back(currentCell);							// add to closedSet using the bounds as the hashkey
+		currentCell->inClosedSet = true;
 
-		if (currentCell == endCell) {								// check if the path is complete
-			std::vector<GridCell_t *> reversePath;
-			while (currentCell != startCell) {						// build the path back (reverse iterator)
-				reversePath.push_back(currentCell);
+		// check if the path is complete
+		if (currentCell == endCell) {
+
+			// reset all the searched cells' costs
+			// and set occupancy bools
+			// to avoid affecting the next search
+			for (auto && cell : openSet) {
+				cell->gCost = 0;
+				cell->hCost = 0;
+				cell->fCost = 0;
+				cell->inOpenSet = false;
+			}
+			for (auto && cell : closedSet) {
+				cell->gCost = 0;
+				cell->hCost = 0;
+				cell->fCost = 0;
+				cell->inClosedSet = false;
+			}
+
+			// TODO(elsewhere): while traversing the path checking for dynamic obstructions
+			// ALSO check neighbors for better (newly re-calculated, then cleared) g,h,f costs
+			// AND if one does have a better cost, then do the same pathfind update as if there were an obstruction
+			// EXCEPT stop when/if the new path reaches a cell already on the old path (IE re-smooth the bumps created by dynamic obstacles)
+
+			// TODO(elsewhere): chache an ULTIMATE/ORDERED endpoint in the entity
+			// then while the entity walks, and the endpoint gets obstructed (hence changing the path.front() endpoint)
+			// when the entity does its per-frame path traversal-check it can compare the path.front() cell to the ULTIMATE/ORDERED
+			// endpoint and try to build a closer path if its freed up
+			
+			// build the path back (reverse iterator)
+			size_t pathIndex = 0;
+			while (currentCell != startCell) {			// FIXME(?): doesn't add a waypoint in the start cell
+
+				// overwrite all old path points between the goal and new start
+				if (entity->path.size() > pathIndex) {
+					entity->path[pathIndex++] = currentCell;
+				} else {
+					entity->path.push_back(currentCell);
+				}
 				currentCell = currentCell->parent;
 			}
-			forwardPath = std::vector<GridCell_t *>(reversePath.rbegin(), reversePath.rend());
-			break;
+
+			// erase any now-invalid waypoints beyond the new path's range
+			// if not just updating a subsection
+			if (startCell == entity->path.back() && entity->path.size() > pathIndex)
+				entity->path.erase(entity->path.begin() + pathIndex, entity->path.end() );
+
+			// set the the local goal
+			entity->currentWaypoint = &entity->path.back()->center;
+			return true;
 		}
 
 		// traverse the current cell's neighbors
 		// updating costs and adding to the openSet as needed 
-		// DEBUG: avoid the cell itself, offmap cells, collision cells, and closedSet cells, respectively
+		// DEBUG: avoid the cell itself, offmap cells, solid cells, OCCUPIED cells, and closedSet cells, respectively
 		for (int row = -1; row <= 1; row++) {
 			for (int col = -1; col <= 1; col++) {
 				int nRow = currentCell->gridRow + row;
@@ -602,25 +862,38 @@ void PathFind(std::shared_ptr<GameObject_t> entity, SDL_Point & goal) {
 				if ((row == 0 && col == 0) ||
 					(nRow < 0 || nRow >= gridRows || nCol < 0 || nCol >= gridCols) ||
 					gameGrid.cells[nRow][nCol].solid ||
-					Search(closedSet, &gameGrid.cells[nRow][nCol])) {
+					!gameGrid.cells[nRow][nCol].contents.empty() ||
+					gameGrid.cells[nRow][nCol].inClosedSet) {
 					continue;
 				}
 
 				// check for updated gCost or entirely new cell
 				GridCell_t * neighbor = &gameGrid.cells[nRow][nCol];
 				int gCost = currentCell->gCost + GetDistance(currentCell, neighbor);
-				if (gCost < neighbor->gCost || !Search(openSet, neighbor)) {
+				if (gCost < neighbor->gCost || !neighbor->inOpenSet) {
 					neighbor->gCost = gCost;
 					neighbor->hCost = GetDistance(neighbor, endCell);
 					neighbor->fCost = gCost + neighbor->hCost;
 					neighbor->parent = currentCell;
 
-					if (!Search(openSet, neighbor))
+					if (!neighbor->inOpenSet) {
 						openSet.push_back(neighbor);
+						neighbor->inOpenSet = true;
+					}
 				}
 			}
 		}
 	}
+	// erase the non-traversable sub-section from startCell to endCell
+	if (entity->path.size() > 1) {
+		auto & end = std::find(entity->path.begin(), entity->path.end(), startCell);
+		entity->path.erase(entity->path.begin(), end - 1);
+		entity->currentWaypoint = &entity->path.back()->center;
+	}
+	else {
+		entity->currentWaypoint = &entity->origin;
+	}
+	return false;
 }
 
 /*
@@ -642,26 +915,390 @@ void UpdateCollision() {
 
 //***************
 // UpdateBob
+// used for animation
 //***************
-void UpdateBob(std::shared_ptr<GameObject_t> entity) {
-	Uint32 dt = SDL_GetTicks() - entity->bobTime;
-	if (entity->health > 0 && dt > 50) {
-		bool continueBob = (entity->velocity.x > 0 || entity->velocity.y > 0);
+void UpdateBob(std::shared_ptr<GameObject_t> & entity) {
+	if (entity->health > 0) {
+		bool continueBob = (entity->velX || entity->velY);
 		if (continueBob && !entity->bobMaxed) {
 			entity->bobMaxed = (++entity->bob >= 5) ? true : false;
 			entity->origin.y--;
-			entity->bounds.y--;
 		} else if (entity->bob > 0) {
 			entity->bobMaxed = (--entity->bob > 0) ? true : false;
 			entity->origin.y++;
-			entity->bounds.y++;
 		}
-		entity->bobTime = SDL_GetTicks();
+	}
+}
+
+
+//***************
+// CheckWaypointRange
+// used for dynamic pathfinding
+//***************
+bool CheckWaypointRange(std::shared_ptr<GameObject_t> & entity, SDL_Point & waypoint) {
+	int xRange = SDL_abs((int)(entity->centerX - waypoint.x));
+	int yRange = SDL_abs((int)(entity->centerY - waypoint.y));
+	return (xRange <= entity->speed && yRange <= entity->speed);
+}
+
+//***************
+// Normalize
+// used for dynamic pathfinding
+//***************
+void Normalize(float & x, float & y) {
+	float length = SDL_sqrtf(x * x + y * y);
+	if (length) {
+		float invLength = 1.0f / length;
+		x *= invLength;
+		y *= invLength;
+	}
+}
+
+//***************
+// UpdateOrigin
+//***************
+void UpdateOrigin(std::shared_ptr<GameObject_t>  & entity) {
+	int dx = (int)nearbyintf(entity->speed * entity->velX);
+	int dy = (int)nearbyintf(entity->speed * entity->velY);
+
+	entity->origin.x += dx;
+	entity->origin.y += dy;
+	entity->bounds.x += dx;
+	entity->bounds.y += dy;
+	entity->centerX += nearbyintf(entity->speed * entity->velX);
+	entity->centerY += nearbyintf(entity->speed * entity->velY);
+}
+
+//***************
+// UpdateCellReferences
+// collision utitliy
+//***************
+void UpdateCellReferences(std::shared_ptr<GameObject_t> & entity) {
+	// remove the entity from any gameGrid.cells its currently in
+	for (auto && cell : entity->cells) {
+		auto & index = std::find(cell->contents.begin(), cell->contents.end(), entity);
+		if (index != cell->contents.end())
+			cell->contents.erase(index);
+	}
+
+	// empty the entity's cell references
+	entity->cells.clear();
+
+	// check entity->bounds' four corners
+	// entity will wind up with 1 - 4 gameGrid cell references
+	// and those same gameGrid cells will have references to the entity
+	for (int corner = 0; corner < 4; corner++) {
+		SDL_Point testPoint;
+		switch (corner) {
+			case 0: testPoint = { entity->bounds.x , entity->bounds.y }; break;
+			case 1: testPoint = { entity->bounds.x + entity->bounds.w, entity->bounds.y }; break;
+			case 2: testPoint = { entity->bounds.x , entity->bounds.y + entity->bounds.h }; break;
+			case 3: testPoint = { entity->bounds.x + entity->bounds.w , entity->bounds.y + entity->bounds.h}; break;
+		}
+
+		// update the entity->cells
+		int testRow = testPoint.x / cellSize;
+		int testCol = testPoint.y / cellSize;
+		if (testRow < 0 || testRow >= gridRows || testCol < 0 || testCol >= gridCols)
+			continue;
+
+		GridCell_t * cell = &gameGrid.cells[testRow][testCol];
+		if (cell->solid)
+			continue;
+
+		if (std::find(entity->cells.begin(), entity->cells.end(), cell) == entity->cells.end()) 
+			entity->cells.push_back(cell);
+	}
+
+	// add the entity to any gameGrid cells its currently over
+	for (auto && cell : entity->cells) {
+		cell->contents.push_back(entity);
+	}
+}
+
+//***************
+// GetAreaContents
+// dynamic pathfinding utility
+// queries area dynamic contents prior to entering it
+//***************
+void GetAreaContents(const int centerRow, const int centerCol, std::vector<SDL_Rect *> & result, std::shared_ptr<GameObject_t> & ignore) {
+	for (int row = -1; row <= 1; row++) {
+		for(int col = -1; col <= 1; col++) {
+			int checkRow = centerRow + row;
+			int checkCol = centerCol + col;
+			if (checkRow >= 0 && checkRow < gridRows && checkCol >= 0 && checkCol < gridCols) {
+				auto & target = gameGrid.cells[checkRow][checkCol];
+				if (!target.solid) {
+					for (auto && entity : target.contents) {
+						if (entity == ignore)
+							continue;
+						result.push_back(&entity->bounds);
+					}
+				}
+			}
+		}
+	}
+}
+
+//***************
+// TranslateRect
+// dynamic pathfinding utility
+//***************
+void TranslateRect(SDL_Rect & target, float dx, float dy) {
+	target = {	(int)nearbyintf(target.x + dx),
+				(int)nearbyintf(target.y + dy),
+				target.w,
+				target.h };
+}
+
+//******************
+// Rotate
+// expanded and factored version of:
+// (rotationQuaternion) * quaternionVector( targetX, targetY, 0.0f, 0.0f ) * (rotationQuaternion)^-1
+// assumes a right-handed coordinate system
+// if clockwise == false, it rotates the target values counter-clockwise
+// --only deals with unit length quaternions--
+//******************
+void Rotate(bool clockwise, float & targetX, float & targetY) {
+#define DEG2RAD(angle) ( angle * ((float)(M_PI)/180.0f) )
+	static const float ccw[]	= { 0.0f, 0.0f, SDL_sinf(DEG2RAD(1.0f) / 2.0f), SDL_cosf(DEG2RAD(1.0f) / 2.0f) };
+	static const float cw[]		= { 0.0f, 0.0f, SDL_sinf(DEG2RAD(-1.0f) / 2.0f), SDL_cosf(DEG2RAD(-1.0f) / 2.0f) };
+#undef DEG2RAD
+
+	const float * r;
+	if (clockwise)
+		r = cw;
+	else
+		r = ccw;
+
+	float xxzz = r[0]*r[0] - r[2]*r[2];
+	float wwyy = r[3]*r[3] - r[1]*r[1];
+
+	float xy2 = r[0]*r[1]*2.0f;
+	float zw2 = r[2]*r[3]*2.0f;
+
+	float oldX = targetX;
+	float oldY = targetY;
+
+	targetX = (xxzz + wwyy)*oldX + (xy2 - zw2)*oldY;
+	targetY = (xy2 + zw2)*oldX + (r[1]*r[1] + r[3]*r[3] - r[0]*r[0] - r[2]*r[2])*oldY;
+}
+
+//***************
+// Redirect
+// dynamic pathfinding
+//***************
+void Redirect(std::shared_ptr<GameObject_t> & entity, std::vector<SDL_Rect *> & areaContents) {
+	// perform a modified A* that generates N (8-360) neighboring rectangles then does g,h,f cost with the
+	// next waypoint as the goal, and the heuristic does the same 14/10 evaluation based on
+	// the rect's x/y center difference from the goal divided by entity->speed
+	// note: get the rects by rotating and translating the entity->bounds according to speed
+	// and add **copies** to a vector (instead of references because these rects won't exist on the next iteration)
+}
+
+//***************
+// Move
+// dynamic pathfinding
+//***************
+void Move(std::shared_ptr<GameObject_t> & entity) {
+	Uint32 dt = SDL_GetTicks() - entity->moveTime;
+
+	if (dt >= 25 && !entity->path.empty()) {
+		entity->moveTime = SDL_GetTicks();
+
+		if (entity->currentWaypoint == &entity->origin)
+			entity->currentWaypoint = &entity->path.back()->center;
+
+		// set velocity based on next point in path
+		if (!CheckWaypointRange(entity, *entity->currentWaypoint)) {
+
+// BEGIN FREEHILL path cell traversal and update test
+			GridCell_t * prevGood = entity->path.back();
+			bool validPath = true;
+			for (auto && cell = entity->path.rbegin(); cell != entity->path.rend(); cell++) {
+				// check if any cell along the path has become obstructed, 
+				// and if so then pathfind from the last unobstructed cell to the goal cell
+				// DEBUG: ignore the entity itself as part of the cell contents check
+				if ((*cell)->contents.empty() || ((*cell)->contents.size() == 1 && (*cell)->contents[0] == entity)) {
+					prevGood = *cell;
+				} else if (prevGood != entity->path.back()) {
+					validPath = PathFind(entity, prevGood->center, entity->path.front()->center);		
+					break;
+				}
+			}
+// END FREEHILL path cell traversal and update test
+
+			// determine the intended movement direction
+			if (validPath) {
+				float waypointVX = (float)(entity->currentWaypoint->x - entity->centerX);
+				float waypointVY = (float)(entity->currentWaypoint->y - entity->centerY);
+				Normalize(waypointVX, waypointVY);
+				entity->velX = waypointVX;
+				entity->velY = waypointVY;
+			} else {
+				entity->velX = 0.0f;
+				entity->velY = 0.0f;
+			}
+/*
+			// cache references to neighboring cells' contents
+			std::vector<SDL_Rect *> areaContents;
+			GetAreaContents((int)(entity->centerX / cellSize), (int)(entity->centerY / cellSize), areaContents, entity);
+
+			// check for collision at next step along the static path
+			SDL_Rect testBounds = entity->bounds;
+			TranslateRect(testBounds, entity->speed * waypointVX, entity->speed * waypointVY);
+			bool hit = false;
+			SDL_Rect * hitObstacle = nullptr;
+			for (auto && obstacle : areaContents) {
+				if (SDL_HasIntersection(obstacle, &testBounds)) {
+					hitObstacle = obstacle;
+					hit = true;
+					break;
+				}
+			}
+
+//			if (hit) {
+//				Redirect(entity, areaContents);
+//			}
+
+
+			// there's a dynamic obstacle in the way
+			// find a vector that circumnavigates it
+			if (hit) {
+				// calculate center-to-center non-normalized vector once
+				// to set the initial rotation direction
+				int dx = (testBounds.x + (testBounds.w / 2)) - (hitObstacle->x + (hitObstacle->w / 2));
+				int dy = (testBounds.y + (testBounds.h / 2)) - (hitObstacle->y + (hitObstacle->h / 2));
+				bool rotationDir;
+				if (waypointVX < waypointVY) {								// entity is heading mostly vertically
+					rotationDir = dx < 0 ? CLOCKWISE : COUNTER_CLOCKWISE;	// use x-misalignment
+				} else {													// entity is heading mostly horizontally
+					rotationDir = dy < 0 ? CLOCKWISE : COUNTER_CLOCKWISE;	// use y-misalignment
+				}
+
+				// rotate one way, then the other, from center
+				for (int flip = 0; flip < 2; flip++) {
+					if (flip) {
+						rotationDir = !rotationDir;
+						entity->velX = waypointVX;
+						entity->velY = waypointVY;
+					}
+
+					// set the tangent vector perpendicular to entity's velocity
+					// to rotate the testBounds that's one step forward
+					// about entity->bounds' center
+					hit = false;
+					for (int rotationAngle = 1; rotationAngle < 180; rotationAngle++) {	// DEBUG: Rotate(...) uses a 1.0f degree rotation, hence rotationAngle++ and not +=angleIncrement
+						testBounds = entity->bounds;
+						Rotate(rotationDir, entity->velX, entity->velY);
+						TranslateRect(testBounds, entity->speed * entity->velX, entity->speed * entity->velY);
+
+						// check for collision
+						for (auto && obstacle : areaContents) {
+//							DrawRect(*obstacle, opaqueGreen, false);
+//							DrawRect(testBounds, opaqueGreen, true);
+//							SDL_RenderPresent(renderer);
+							if (SDL_HasIntersection(obstacle, &testBounds)) {
+								hit = true;
+								break;
+							}
+						}
+						if (!hit)
+							break;
+					}
+					// push a temporary waypoint to track
+					if (!hit) {
+//						entity->path.push_back(SDL_Point{ testBounds.x + (testBounds.w / 2), testBounds.y + (testBounds.h / 2) });
+//						entity->currentWaypoint = &entity->path.back();
+						break;
+					}
+				}
+			}
+
+			// no free space in a 180/360 degree forward arc this frame
+			if (hit) {
+				entity->velX = 0.0f;
+				entity->velY = 0.0f;
+			}
+*/
+		} else {		
+			// close enough to a waypoint or no waypoints available
+			entity->path.pop_back();
+			entity->velX = 0.0f;
+			entity->velY = 0.0f;
+			entity->currentWaypoint = &entity->origin;
+		}
+		UpdateOrigin(entity);
+		// if the entity moved, then update gameGrid and internal cell lists for collision filtering
+		if (entity->velX || entity->velY)
+			UpdateCellReferences(entity);
+
+		UpdateBob(entity);		// DEBUG: bob does not affect cell location
+	}	
+}
+
+//***************
+// Collide
+// collision response called by the sender
+// TODO: possibly invoke this during Move
+//***************
+void Collide(std::shared_ptr<GameObject_t> & sender, std::shared_ptr<GameObject_t> & receiver) {
+	//	entities[1]->blinkTime = SDL_GetTicks() + 1000;
+	//	entities[1]->damaged = true;
+	//	entities[1]->health = -10;
+}
+
+//***************
+// GoodmanThink
+//***************
+void GoodmanThink(std::shared_ptr<GameObject_t> & entity) {
+	// TODO: Goodmans strategy/state here
+	Move(entity);
+}
+
+//***************
+// MeleeThink
+// TODO: master EntityThink() function calls this based on entity type
+//***************
+void MeleeThink(std::shared_ptr<GameObject_t> & entity) {
+	// TODO: resolve standing orders
+	Move(entity);
+}
+
+//***************
+// RangedThink
+//***************
+void RangedThink(std::shared_ptr<GameObject_t> & entity) {
+	// TODO: resolve standing orders
+	Move(entity);
+}
+
+//***************
+// MissileThink
+//***************
+void MissileThink(std::shared_ptr<GameObject_t> & entity) {
+	// TODO: resolve linear trajectory, not pathfinding
+	Move(entity);
+}
+
+//***************
+// Think
+// master GameObject_t think function
+//***************
+void Think() {
+	for (auto && entity : entities) {
+		switch (entity->type) {
+			case OBJECTTYPE_GOODMAN: GoodmanThink(entity);  break;
+			case OBJECTTYPE_MELEE: MeleeThink(entity);  break;
+			case OBJECTTYPE_RANGED: RangedThink(entity);  break;
+			case OBJECTTYPE_MISSILE: MissileThink(entity);  break;
+		}
 	}
 }
 
 //***************
 // SelectArea
+// monster selection
 //***************
 void SelectArea(SDL_Point & first, SDL_Point & second) {
 	int firstRow	= first.x / cellSize;
@@ -685,7 +1322,8 @@ void SelectArea(SDL_Point & first, SDL_Point & second) {
 	int startCol	= (firstCol < secondCol) ? firstCol : secondCol;
 	int endCol		= (startCol == firstCol) ? secondCol : firstCol;
 
-	// build the list of selected cells
+	// build the list of selected cells to search
+	// OR literally just search each cells contents for monsters/goodman
 	for (int row = startRow; row <= endRow; row++) {
 		for(int col = startCol; col <= endCol; col++)
 		selection.push_back(&gameGrid.cells[row][col]);
@@ -698,6 +1336,9 @@ void SelectArea(SDL_Point & first, SDL_Point & second) {
 void ClearAreaSelection() {
 	selection.clear();
 }
+
+//-------------------------------------END PER-FRAME FUNCTIONS-----------------------------------------//
+//-------------------------------------BEGIN MAIN------------------------------------------------------//
 
 //***************
 // WinMain
@@ -724,38 +1365,44 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 	while (running) {
 		while (SDL_PollEvent(&event)) {
 			switch (event.type) {
-			case SDL_QUIT:
-				running = false;
-				break;
-			case SDL_MOUSEMOTION:
-				mouseX = event.motion.x;
-				mouseY = event.motion.y;
-				second = { mouseX, mouseY };
-				break;
-			case SDL_MOUSEBUTTONDOWN:
-				first = { event.button.x, event.button.y };
-				beginSelection = true;
-				ClearAreaSelection();
-				break;
-			case SDL_MOUSEBUTTONUP:
-				if (beginSelection) {
-					beginSelection = false;
-					SelectArea(first, second);
+				case SDL_QUIT: {
+					running = false;
+					break;
 				}
-				entities[1]->blinkTime = SDL_GetTicks() + 1000;
-				entities[1]->damaged = true;
-				entities[1]->health = -10;
-				break;
-			default:
-				break;
+				case SDL_MOUSEMOTION: {
+					mouseX = event.motion.x;
+					mouseY = event.motion.y;
+					second = { mouseX, mouseY };
+					break;
+				}
+				case SDL_MOUSEBUTTONDOWN: {
+					first = { event.button.x, event.button.y };
+					beginSelection = true;
+					ClearAreaSelection();
+					break;
+				}
+				case SDL_MOUSEBUTTONUP: {
+					if (beginSelection) {
+						beginSelection = false;
+						SelectArea(first, second);
+					}
+
+					// test A* pathfinding
+					// TODO: call based on a current group/individual selection
+					// and loop over that (regardless of orders)
+					for (auto && entity : entities) {
+						PathFind(entity, SDL_Point{ (int)entity->centerX, (int)entity->centerY }, second);
+					}
+					break;
+				}
 			}
 		}
 
 		if (!beginSelection)
 			first = second;
 
-		// Test A* pathfinding
-		PathFind(entities[entityAtlas["goodman"]], second);
+		// test basic path following
+		Think();
 
 		// begin drawing
 		SDL_RenderClear(renderer);
@@ -767,20 +1414,8 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 //		DrawGameGrid();
 
 		// draw the collision layer
-		DrawCollision();
-
-		for (auto && cell : forwardPath) {
-			DrawRect(cell->bounds, opaqueGreen, true);
-		}
-
-		// test entity bob
-		auto & test = entities[entityAtlas["goodman"]];
-		test->velocity.x = 1;
-		UpdateBob(test);
-
-		auto & test2 = entities[entityAtlas["melee_1"]];
-		test2->velocity.x = 1;
-		UpdateBob(test2);
+		if (DebugCheck(DEBUG_DRAW_COLLISION))
+			DrawCollision();
 
 		// draw all entities
 		DrawEntities();
@@ -811,3 +1446,4 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 	SDL_Quit();
 	return 0;
 }
+//-------------------------------------END MAIN------------------------------------------------------//

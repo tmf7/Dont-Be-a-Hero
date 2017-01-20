@@ -17,4 +17,6 @@
 #include <algorithm>
 #include <queue>
 
+#define BIT(x) 1 << x
+
 #endif /* DBAH_DEFINITIONS_H */
