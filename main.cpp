@@ -8,6 +8,8 @@
 #include <Windows.h>
 #include "Definitions.h"
 
+#define EMPTY_EXCEPT_SELF(gridCell, entity) (gridCell.contents.empty() || (gridCell.contents.size() == 1 && gridCell.contents[0]->guid == entity->guid))
+
 //----------------------------------------BEGIN DATA STRUCTURES---------------------------------------//
 
 // rendering info
@@ -54,7 +56,7 @@ typedef struct GameObject_s GameObject_t;
 // GridCell_t
 typedef struct GridCell_s {
 	// pathfinding
-	GridCell_s * parent;		// originating cell to set the path back from the goal
+	GridCell_s * parent = nullptr;		// originating cell to set the path back from the goal
 	int gCost = 0;				// distance from start cell to this cell
 	int hCost = 0;				// distance from this cell to goal
 	int fCost = 0;				// sum of gCost and hCost
@@ -117,12 +119,13 @@ typedef struct GameObject_s {
 
 	ObjectType_t	type;		// for faster Think calls
 	std::string		name;		// globally unique name (substring can be used for spriteSheet.frameAtlas)
+	int				guid;		// globally unique identifier amongst all entites (by number)
 
 	SDL_Point *						currentWaypoint;
 	std::vector<GridCell_t *>		path;				// A* pathfinding results
 	
 
-	std::vector<GridCell_t *>	cells;	// currently occupied gameGrid.cells indexes (between 1 and 4)
+	std::vector<GridCell_t *>		cells;	// currently occupied gameGrid.cells indexes (between 1 and 4)
 
 	GameObject_s() 
 		:	origin({0, 0}),
@@ -142,11 +145,12 @@ typedef struct GameObject_s {
 			stamina(0),
 			damaged(false),
 			fatigued(false),
-			type(OBJECTTYPE_INVALID) {
+			type(OBJECTTYPE_INVALID),
+			guid(-1){
 			currentWaypoint = &origin;
 	};
 
-	GameObject_s(const SDL_Point & origin,  const std::string & name, ObjectType_t type) 
+	GameObject_s(const SDL_Point & origin,  const std::string & name, const int guid, ObjectType_t type) 
 		:	origin(origin),
 			velX(0),
 			velY(0),
@@ -158,7 +162,8 @@ typedef struct GameObject_s {
 			blinkTime(0),
 			damaged(false),
 			fatigued(false),
-			type(type) {
+			type(type),
+			guid(guid) {
 		currentWaypoint = &(this->origin);
 		bounds = {origin.x + 4, origin.y + 4, 8, 16 };
 		centerX = (float)bounds.x + (float)bounds.w / 2.0f;
@@ -271,8 +276,16 @@ void DrawOutlineText(const char * text, const SDL_Point & location, const SDL_Co
 // DrawPath
 //***************
 void DrawPath(std::shared_ptr<GameObject_t> & entity) {
-	for (auto && cell : entity->path)
-		DrawRect(SDL_Rect{ cell->center.x, cell->center.y, 2, 2 }, opaqueGreen, true);
+	for (auto && cell : entity->path) {
+		SDL_Color drawColor;
+		if (cell == *(entity->path.begin()))	// DEBUG: this should be the point closest to the goal
+			drawColor = opaqueRed;
+		else if (cell == *(entity->path.rbegin())) // DEBUG: this should be the point closest to the sprite
+			drawColor = {25, 128, 255, 255};
+		else
+			drawColor = opaqueGreen;
+		DrawRect(SDL_Rect{ cell->center.x, cell->center.y, 2, 2 }, drawColor, true);
+	}
 }
 
 //***************
@@ -509,7 +522,7 @@ void SpawnGoodman() {
 	int spawnCol = spawnY / cellSize;
 	// TODO: make this a random location in the grid (that isn't a collision tile)
 	std::string name = "goodman";
-	std::shared_ptr<GameObject_t> goodman = std::make_shared<GameObject_t>(SDL_Point{ spawnX, spawnY }, name, OBJECTTYPE_GOODMAN);
+	std::shared_ptr<GameObject_t> goodman = std::make_shared<GameObject_t>(SDL_Point{ spawnX, spawnY }, name, entityGUID, OBJECTTYPE_GOODMAN);
 	entities.push_back(goodman);
 	entityAtlas[name] = entityGUID++;
 	UpdateCellReferences(goodman);
@@ -519,7 +532,6 @@ void SpawnGoodman() {
 // SpawnMonsters
 // TODO: cluster spawn points in a region of the map farthest from Goodman
 // OR: potentially pick TWO  spawn points, then "animate" the monsters flooding in (which affects strategy)
-// TODO: make sure to update grid and monsters/goodman cell lists when spawning
 //***************
 void SpawnMonsters() {
 	// seed the random number generator
@@ -527,11 +539,12 @@ void SpawnMonsters() {
 
 	// a valid spawnpoint is not solid 
 	// and has no other gameobjects
-	for (int count = 0; count < 2; count++) {
+	for (int count = 0; count < 20; count++) {
 		
 		SDL_Point spawnPoint;
 		SDL_Point spawnCell;
-		do {
+		do {	// FIXME: monster sometimes spawn in solid cells
+				// probably because the point used is the SPRITE top-left "origin" instead of an AREA or collision center
 			spawnPoint.x = rand() % gameWidth;					
 			spawnPoint.y = rand() % (gameHeight - cellSize);	// DEBUG: no grid row along bottom of the screen
 			spawnCell.x = spawnPoint.x / cellSize;				// FIXME(?): bounds check these row/col
@@ -549,7 +562,7 @@ void SpawnMonsters() {
 		name += std::to_string(entityGUID);
 
 		// add it to the entity vector, entityAtlas, and gameGrid
-		std::shared_ptr<GameObject_t> monster = std::make_shared<GameObject_t>(spawnPoint, name, type);
+		std::shared_ptr<GameObject_t> monster = std::make_shared<GameObject_t>(spawnPoint, name, entityGUID, type);
 		entities.push_back(monster);
 		entityAtlas[name] = entityGUID++;
 		UpdateCellReferences(monster);
@@ -662,10 +675,40 @@ int GetDistance(GridCell_t * start, GridCell_t * end) {
 }
 
 //***************
+// ClearSets
+// reset all the searched cells' costs
+// and set occupancy bools
+// to avoid affecting the next search
+//***************
+void ClearSets(std::vector<GridCell_t *> & openSet, std::vector<GridCell_t*> & closedSet) {
+	// clear the openSet
+	for (auto && cell : openSet) {
+		cell->gCost = 0;
+		cell->hCost = 0;
+		cell->fCost = 0;
+		cell->inOpenSet = false;
+		cell->parent = nullptr;
+	}
+	openSet.clear();
+
+	// clear the closedSet
+	for (auto && cell : closedSet) {
+		cell->gCost = 0;
+		cell->hCost = 0;
+		cell->fCost = 0;
+		cell->inClosedSet = false;
+		cell->parent = nullptr;
+	}
+	closedSet.clear();
+}
+
+//***************
 // PathFind
 // A* search of gameGrid cells
 // only searches static non-solid geometry
 // entities will perform dynamic collision avoidance on the fly
+// returns false if no valid path is found (also clears the current path)
+// returns true if a valid path was constructed (after clearing the current path)
 //***************
 bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Point & goal) {
 
@@ -706,77 +749,8 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 		entity->currentWaypoint = &entity->origin;
 		return false;
 	}
-////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-	// if the endCell is obstructed by a dynamic obstacle, 
-	// then floodfill for a nearby empty cell to set as the goal
-	if (!endCell->contents.empty() && !(endCell->contents.size() == 1 && endCell->contents[0] == entity)) {
-
-		// continue until there are no new neighbors to search
-		// DEBUG: this simple conditions works because my hard-coded map is all open areas
-		// DEBUG: however, there is an alternative where one searches one of several vectors
-		// containing cells paired according to color-codes indicating their pre-processed static reachability
-		closedSet.clear();
-		closedSet.push_back(endCell);
-		endCell->inClosedSet = true;
-		bool endCellUpdated = false;
-		size_t oldSetSize = 0;
-		while(oldSetSize < closedSet.size()) {
-			oldSetSize = closedSet.size();
-			auto & currentCell = closedSet.back();
-
-			// DEBUG: avoid the cell itself, offmap cells, solid cells, and closedSet cells, respectively
-			for (int row = -1; row <= 1; row++) {
-				for (int col = -1; col <= 1; col++) {
-					int nRow = currentCell->gridRow + row;
-					int nCol = currentCell->gridCol + col;
-
-					// check for invalid neighbors
-					if ((row == 0 && col == 0) ||
-						(nRow < 0 || nRow >= gridRows || nCol < 0 || nCol >= gridCols) ||
-						gameGrid.cells[nRow][nCol].solid ||
-						gameGrid.cells[nRow][nCol].inClosedSet) {
-						continue;
-					}
-
-					// attempt to update the endCell
-					GridCell_t * neighbor = &gameGrid.cells[nRow][nCol];
-					if (neighbor->contents.empty() || (neighbor->contents.size() == 1 && neighbor->contents[0] == entity)) {
-						endCell = neighbor;
-						endCellUpdated = true;
-						for (auto && cell : closedSet) {
-							cell->inClosedSet = false;
-						}
-						break;
-					} else {
-						closedSet.push_back(neighbor);
-						neighbor->inClosedSet = true;
-					}
-				}
-				if (endCellUpdated)
-					break;
-			}
-			if (endCellUpdated)
-				break;
-		}
-
-		// empty the non-traversable sub-section from startCell to endCell
-		// BUG(?): end variable is never path.end(), so it isn't checked for
-		if (!endCellUpdated) {
-			if (entity->path.size() > 1) {
-				auto & end = std::find(entity->path.begin(), entity->path.end(), startCell);
-				entity->path.erase(entity->path.begin(), end - 1);
-				entity->currentWaypoint = &entity->path.back()->center;
-			} else {
-				entity->currentWaypoint = &entity->origin;
-			}
-			return false;
-		} 
-	}
-/////////////////////////////////////////////////////////////////////////////////
-
-	openSet.clear();
-	closedSet.clear();
+	
+	// TODO: account for obstructed endCell (update it here?)
 
 	// openset sort priority: first by fCost, then by hCost 
 	auto cmp = [](auto && a, auto && b) {
@@ -801,52 +775,21 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 		// check if the path is complete
 		if (currentCell == endCell) {
 
-			// reset all the searched cells' costs
-			// and set occupancy bools
-			// to avoid affecting the next search
-			for (auto && cell : openSet) {
-				cell->gCost = 0;
-				cell->hCost = 0;
-				cell->fCost = 0;
-				cell->inOpenSet = false;
-			}
-			for (auto && cell : closedSet) {
-				cell->gCost = 0;
-				cell->hCost = 0;
-				cell->fCost = 0;
-				cell->inClosedSet = false;
-			}
+			// ready the path for updating
+			entity->path.clear();
 
-			// TODO(elsewhere): while traversing the path checking for dynamic obstructions
-			// ALSO check neighbors for better (newly re-calculated, then cleared) g,h,f costs
-			// AND if one does have a better cost, then do the same pathfind update as if there were an obstruction
-			// EXCEPT stop when/if the new path reaches a cell already on the old path (IE re-smooth the bumps created by dynamic obstacles)
-
-			// TODO(elsewhere): chache an ULTIMATE/ORDERED endpoint in the entity
-			// then while the entity walks, and the endpoint gets obstructed (hence changing the path.front() endpoint)
-			// when the entity does its per-frame path traversal-check it can compare the path.front() cell to the ULTIMATE/ORDERED
-			// endpoint and try to build a closer path if its freed up
-			
 			// build the path back (reverse iterator)
-			size_t pathIndex = 0;
-			while (currentCell != startCell) {			// FIXME(?): doesn't add a waypoint in the start cell
-
-				// overwrite all old path points between the goal and new start
-				if (entity->path.size() > pathIndex) {
-					entity->path[pathIndex++] = currentCell;
-				} else {
-					entity->path.push_back(currentCell);
-				}
+			while (currentCell->parent != nullptr) {
+				entity->path.push_back(currentCell);
 				currentCell = currentCell->parent;
 			}
 
-			// erase any now-invalid waypoints beyond the new path's range
-			// if not just updating a subsection
-			if (startCell == entity->path.back() && entity->path.size() > pathIndex)
-				entity->path.erase(entity->path.begin() + pathIndex, entity->path.end() );
-
 			// set the the local goal
 			entity->currentWaypoint = &entity->path.back()->center;
+
+			// ensure no GridCell_t conflicts on successive path searches
+			ClearSets(openSet, closedSet);
+
 			return true;
 		}
 
@@ -862,7 +805,7 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 				if ((row == 0 && col == 0) ||
 					(nRow < 0 || nRow >= gridRows || nCol < 0 || nCol >= gridCols) ||
 					gameGrid.cells[nRow][nCol].solid ||
-					!gameGrid.cells[nRow][nCol].contents.empty() ||
+					!EMPTY_EXCEPT_SELF(gameGrid.cells[nRow][nCol], entity) ||
 					gameGrid.cells[nRow][nCol].inClosedSet) {
 					continue;
 				}
@@ -884,16 +827,12 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 			}
 		}
 	}
-	// erase the non-traversable sub-section from startCell to endCell
-	if (entity->path.size() > 1) {
-		auto & end = std::find(entity->path.begin(), entity->path.end(), startCell);
-		entity->path.erase(entity->path.begin(), end - 1);
-		entity->currentWaypoint = &entity->path.back()->center;
-	}
-	else {
-		entity->currentWaypoint = &entity->origin;
-	}
-	return false;
+	// ensure no GridCell_t conflicts on successive path searches
+	ClearSets(openSet, closedSet);
+
+	entity->path.clear();
+	entity->currentWaypoint = &entity->origin;
+	return false;		// DEBUG: this will be hit if an entity is surrounded by entities on its first search
 }
 
 /*
@@ -1113,32 +1052,37 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 		if (!CheckWaypointRange(entity, *entity->currentWaypoint)) {
 
 // BEGIN FREEHILL path cell traversal and update test
-			GridCell_t * prevGood = entity->path.back();
-			bool validPath = true;
-			for (auto && cell = entity->path.rbegin(); cell != entity->path.rend(); cell++) {
-				// check if any cell along the path has become obstructed, 
-				// and if so then pathfind from the last unobstructed cell to the goal cell
-				// DEBUG: ignore the entity itself as part of the cell contents check
-				if ((*cell)->contents.empty() || ((*cell)->contents.size() == 1 && (*cell)->contents[0] == entity)) {
-					prevGood = *cell;
-				} else if (prevGood != entity->path.back()) {
-					validPath = PathFind(entity, prevGood->center, entity->path.front()->center);		
-					break;
+			
+			// move along the path from entity to goal to determine if the path needs updating
+			// if so, then update the entire path (ie clear and reset it, for now)
+			bool pathChanged;
+			do {
+				pathChanged = false;
+				for (auto && cell = entity->path.rbegin(); cell != entity->path.rend(); cell++) {
+					// DEBUG: ignore the entity itself as part of the cell contents check
+					if (EMPTY_EXCEPT_SELF((**cell), entity)) {
+						continue;
+					} else {
+						for (auto && newGoal : entity->path) {
+							// move along the path from goal to entity to determine the new goal
+							if (EMPTY_EXCEPT_SELF((*newGoal), entity))
+								pathChanged = PathFind(entity, SDL_Point{ (int)entity->centerX, (int)entity->centerY }, newGoal->center);
+							if (pathChanged || entity->path.empty())
+								break;
+						}
+					}
+					if (pathChanged || entity->path.empty())
+						break;
 				}
-			}
+			} while (pathChanged && !entity->path.empty());
 // END FREEHILL path cell traversal and update test
 
 			// determine the intended movement direction
-			if (validPath) {
-				float waypointVX = (float)(entity->currentWaypoint->x - entity->centerX);
-				float waypointVY = (float)(entity->currentWaypoint->y - entity->centerY);
-				Normalize(waypointVX, waypointVY);
-				entity->velX = waypointVX;
-				entity->velY = waypointVY;
-			} else {
-				entity->velX = 0.0f;
-				entity->velY = 0.0f;
-			}
+			float waypointVX = (float)(entity->currentWaypoint->x - entity->centerX);
+			float waypointVY = (float)(entity->currentWaypoint->y - entity->centerY);
+			Normalize(waypointVX, waypointVY);
+			entity->velX = waypointVX;
+			entity->velY = waypointVY;
 /*
 			// cache references to neighboring cells' contents
 			std::vector<SDL_Rect *> areaContents;
@@ -1252,7 +1196,7 @@ void Collide(std::shared_ptr<GameObject_t> & sender, std::shared_ptr<GameObject_
 // GoodmanThink
 //***************
 void GoodmanThink(std::shared_ptr<GameObject_t> & entity) {
-	// TODO: Goodmans strategy/state here
+	// TODO: Goodman's strategy/state here
 	Move(entity);
 }
 
