@@ -27,7 +27,7 @@ typedef enum {
 	DEBUG_DRAW_PATH = BIT(1)
 } DebugFlags_t;
 
-Uint16 debugState = DEBUG_DRAW_PATH;// DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH;
+Uint16 debugState = DEBUG_DRAW_PATH; // DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH;
 
 //***************
 // DebugCheck
@@ -49,6 +49,46 @@ struct {
 	std::unordered_map<std::string, int> frameAtlas;
 	std::vector<SDL_Rect> frames;
 } spriteSheet;
+
+// floating point set
+typedef struct Vec2_s {
+	float x;
+	float y;
+
+	float operator[](const int index) const {
+		return (&x)[index];
+	}
+
+	float & operator[](const int index) {
+		return (&x)[index];
+	}
+
+	Vec2_s operator*(const float & scale) const {
+		return { x * scale, y * scale };
+	}
+
+	// dot product
+	float operator*(const Vec2_s & rhs) const {
+		return x * rhs.x + y * rhs.y;
+	}
+
+	Vec2_s operator+(const Vec2_s & rhs) const { 
+		return { x + rhs.x, y + rhs.y }; 
+	}
+
+	Vec2_s operator-(const Vec2_s & rhs) const {
+		return { x - rhs.x, y - rhs.y };
+	}
+
+	Vec2_s & operator+=(const Vec2_s & rhs) {
+		x += rhs.x;
+		y += rhs.y;
+		return *this;
+	}
+
+} Vec2_t;
+
+Vec2_t vec2zero = { 0.0f, 0.0f };
 
 // forward declaration of GameObject_t
 typedef struct GameObject_s GameObject_t;
@@ -98,43 +138,38 @@ typedef enum {
 
 // GameObject_t
 typedef struct GameObject_s {
-	SDL_Point	origin;			// top-left of sprite image
-	SDL_Rect	bounds;			// world-position and size of collision box
-	int			speed;
-	float		velX;
-	float		velY;
-	float		centerX;		// center of the collision bounding box
-	float		centerY;		// center of the collision bounding box
+	SDL_Point		origin;			// top-left of sprite image
+	SDL_Rect		bounds;			// world-position and size of collision box
+	float			speed;
+	Vec2_t			velocity;
+	Vec2_t			center;			// center of the collision bounding box
 
-	int			bob;			// the illusion of walking
-	bool		bobMaxed;		// peak bob height, return to 0
-	Uint32		moveTime;		// delay between move updates
+	int				bob;			// the illusion of walking
+	bool			bobMaxed;		// peak bob height, return to 0
+	Uint32			moveTime;		// delay between move updates
 
-	int			facing;			// left or right to determine flip
-	int			health;			// health <= 0 rotates sprite 90 and color-blends gray, hit color-blends red
-	int			stamina;		// subtraction color-blends blue for a few frames, stamina <= 0 blinks blue until full
-	bool		damaged;
-	bool		fatigued;
-	Uint32		blinkTime;		// future point to stop color mod
+	int				facing;			// left or right to determine flip
+	int				health;			// health <= 0 rotates sprite 90 and color-blends gray, hit color-blends red
+	int				stamina;		// subtraction color-blends blue for a few frames, stamina <= 0 blinks blue until full
+	bool			damaged;
+	bool			fatigued;
+	Uint32			blinkTime;		// future point to stop color mod
 
-	ObjectType_t	type;		// for faster Think calls
-	std::string		name;		// globally unique name (substring can be used for spriteSheet.frameAtlas)
-	int				guid;		// globally unique identifier amongst all entites (by number)
+	ObjectType_t	type;			// for faster Think calls
+	std::string		name;			// globally unique name (substring can be used for spriteSheet.frameAtlas)
+	int				guid;			// globally unique identifier amongst all entites (by number)
+	int				groupID;		// entity-group this belongs to (for flocking behavior)
 
 	SDL_Point *						currentWaypoint;
 	std::vector<GridCell_t *>		path;				// A* pathfinding results
-	
-
-	std::vector<GridCell_t *>		cells;	// currently occupied gameGrid.cells indexes (between 1 and 4)
+	std::vector<GridCell_t *>		cells;				// currently occupied gameGrid.cells indexes (between 1 and 4)
 
 	GameObject_s() 
 		:	origin({0, 0}),
 			bounds({0, 0, 0, 0}),
-			centerX(0.0f),
-			centerY(0.0f),
-			speed(0),
-			velX(0),
-			velY(0),
+			center(vec2zero),
+			speed(0.0f),
+			velocity(vec2zero),
 			name("invalid"),
 			bob(0),
 			bobMaxed(false),
@@ -152,8 +187,7 @@ typedef struct GameObject_s {
 
 	GameObject_s(const SDL_Point & origin,  const std::string & name, const int guid, ObjectType_t type) 
 		:	origin(origin),
-			velX(0),
-			velY(0),
+			velocity(vec2zero),
 			name(name),
 			bob(0),
 			bobMaxed(false),
@@ -166,8 +200,8 @@ typedef struct GameObject_s {
 			guid(guid) {
 		currentWaypoint = &(this->origin);
 		bounds = {origin.x + 4, origin.y + 4, 8, 16 };
-		centerX = (float)bounds.x + (float)bounds.w / 2.0f;
-		centerY = (float)bounds.y + (float)bounds.h / 2.0f;
+		center.x = (float)bounds.x + (float)bounds.w / 2.0f;
+		center.y = (float)bounds.y + (float)bounds.h / 2.0f;
 		switch (type) {
 			case OBJECTTYPE_GOODMAN:
 				health = 100;
@@ -750,8 +784,6 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 		return false;
 	}
 	
-	// TODO: account for obstructed endCell (update it here?)
-
 	// openset sort priority: first by fCost, then by hCost 
 	auto cmp = [](auto && a, auto && b) {
 		if (a->fCost > b->fCost)
@@ -805,7 +837,7 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 				if ((row == 0 && col == 0) ||
 					(nRow < 0 || nRow >= gridRows || nCol < 0 || nCol >= gridCols) ||
 					gameGrid.cells[nRow][nCol].solid ||
-					!EMPTY_EXCEPT_SELF(gameGrid.cells[nRow][nCol], entity) ||
+//					!EMPTY_EXCEPT_SELF(gameGrid.cells[nRow][nCol], entity) ||
 					gameGrid.cells[nRow][nCol].inClosedSet) {
 					continue;
 				}
@@ -858,7 +890,7 @@ void UpdateCollision() {
 //***************
 void UpdateBob(std::shared_ptr<GameObject_t> & entity) {
 	if (entity->health > 0) {
-		bool continueBob = (entity->velX || entity->velY);
+		bool continueBob = (entity->velocity.x || entity->velocity.y);
 		if (continueBob && !entity->bobMaxed) {
 			entity->bobMaxed = (++entity->bob >= 5) ? true : false;
 			entity->origin.y--;
@@ -874,9 +906,9 @@ void UpdateBob(std::shared_ptr<GameObject_t> & entity) {
 // CheckWaypointRange
 // used for dynamic pathfinding
 //***************
-bool CheckWaypointRange(std::shared_ptr<GameObject_t> & entity, SDL_Point & waypoint) {
-	int xRange = SDL_abs((int)(entity->centerX - waypoint.x));
-	int yRange = SDL_abs((int)(entity->centerY - waypoint.y));
+bool CheckWaypointRange(std::shared_ptr<GameObject_t> & entity) {
+	int xRange = SDL_abs((int)(entity->center.x - entity->currentWaypoint->x));
+	int yRange = SDL_abs((int)(entity->center.y - entity->currentWaypoint->y));
 	return (xRange <= entity->speed && yRange <= entity->speed);
 }
 
@@ -884,28 +916,28 @@ bool CheckWaypointRange(std::shared_ptr<GameObject_t> & entity, SDL_Point & wayp
 // Normalize
 // used for dynamic pathfinding
 //***************
-void Normalize(float & x, float & y) {
-	float length = SDL_sqrtf(x * x + y * y);
+void Normalize(Vec2_t & v) {
+	float length = SDL_sqrtf(v.x * v.x + v.y * v.y);
 	if (length) {
 		float invLength = 1.0f / length;
-		x *= invLength;
-		y *= invLength;
+		v.x *= invLength;
+		v.y *= invLength;
 	}
 }
 
 //***************
 // UpdateOrigin
 //***************
-void UpdateOrigin(std::shared_ptr<GameObject_t>  & entity) {
-	int dx = (int)nearbyintf(entity->speed * entity->velX);
-	int dy = (int)nearbyintf(entity->speed * entity->velY);
+void UpdateOrigin(std::shared_ptr<GameObject_t>  & entity, const Vec2_t & minMove) {
+	int dx = (int)nearbyintf(minMove.x);	// (int)nearbyintf(entity->speed * entity->velocity.x);
+	int dy = (int)nearbyintf(minMove.y);	// (int)nearbyintf(entity->speed * entity->velocity.y);
 
 	entity->origin.x += dx;
 	entity->origin.y += dy;
 	entity->bounds.x += dx;
 	entity->bounds.y += dy;
-	entity->centerX += nearbyintf(entity->speed * entity->velX);
-	entity->centerY += nearbyintf(entity->speed * entity->velY);
+	entity->center.x += nearbyintf(minMove.x);	// nearbyintf(entity->speed * entity->velocity.x);
+	entity->center.y += nearbyintf(minMove.y);	// nearbyintf(entity->speed * entity->velocity.y);
 }
 
 //***************
@@ -958,9 +990,12 @@ void UpdateCellReferences(std::shared_ptr<GameObject_t> & entity) {
 //***************
 // GetAreaContents
 // dynamic pathfinding utility
-// queries area dynamic contents prior to entering it
+// queries area dynamic contents
 //***************
-void GetAreaContents(const int centerRow, const int centerCol, std::vector<SDL_Rect *> & result, std::shared_ptr<GameObject_t> & ignore) {
+void GetAreaContents(const int centerRow, const int centerCol, std::vector<std::shared_ptr<GameObject_t>> & result, std::shared_ptr<GameObject_t> & ignore) {
+
+	static std::vector<int> idList;
+
 	for (int row = -1; row <= 1; row++) {
 		for(int col = -1; col <= 1; col++) {
 			int checkRow = centerRow + row;
@@ -968,26 +1003,179 @@ void GetAreaContents(const int centerRow, const int centerCol, std::vector<SDL_R
 			if (checkRow >= 0 && checkRow < gridRows && checkCol >= 0 && checkCol < gridCols) {
 				auto & target = gameGrid.cells[checkRow][checkCol];
 				if (!target.solid) {
+
 					for (auto && entity : target.contents) {
-						if (entity == ignore)
+						if (entity->guid == ignore->guid)
 							continue;
-						result.push_back(&entity->bounds);
+
+						// DEBUG: don't add the same entity twice for those over multiple cells
+						auto & checkID = std::find(idList.begin(), idList.end(), entity->guid);
+						if (checkID == idList.end()) {
+							result.push_back(entity);
+							idList.push_back(entity->guid);
+						}
 					}
+
 				}
 			}
 		}
 	}
+
+	idList.clear();
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+// BEGIN FREEHILL flocking test
+
+//***************
+// GetGroupAlignment
+// flocking utility
+// calculates the normalized average group velocity
+// TODO(?): weighted average
+//***************
+void GetGroupAlignment(std::vector<std::shared_ptr<GameObject_t>> & areaContents, std::shared_ptr<GameObject_t> & self, Vec2_t & result) {
+	result = vec2zero;
+	if (!areaContents.size())
+		return;
+
+	float groupCount = 0.0f;
+	for (auto && entity : areaContents) {
+		if (entity->groupID == self->groupID) {
+			result.x += entity->velocity.x;
+			result.y += entity->velocity.y;
+			groupCount++;
+		}
+	}
+
+	if (!groupCount)
+		return;
+
+	result.x /= groupCount;
+	result.y /= groupCount;
+	Normalize(result);
+}
+//***************
+// GetGroupCohesion
+// flocking utility
+// calulates the average group center
+// then a normalized vector towards that center
+//***************
+void GetGroupCohesion(std::vector<std::shared_ptr<GameObject_t>> & areaContents, std::shared_ptr<GameObject_t> & self, Vec2_t & result) {
+	result = vec2zero;
+	if (!areaContents.size())
+		return;
+
+	float groupCount = 0.0f;
+	for (auto && entity : areaContents) {
+		if (entity->groupID == self->groupID) {
+			result.x += entity->center.x;
+			result.y += entity->center.y;
+			groupCount++;
+		}
+	}
+
+	if (!groupCount)
+		return;
+
+	result.x /= groupCount;
+	result.y /= groupCount;
+	result = { result.x - self->center.x, result.y - self->center.y };
+	Normalize(result);
+}
+
+//***************
+// GetGroupSeparation
+// flocking utility
+// calculates the average separation from group members
+// TODO(?): wieghted average
+//***************
+void GetGroupSeparation(std::vector<std::shared_ptr<GameObject_t>> & areaContents, std::shared_ptr<GameObject_t> & self, Vec2_t & result) {
+	result = vec2zero;
+	if (!areaContents.size())
+		return;
+
+	float groupCount = 0.0f;
+	for (auto && entity : areaContents) {
+		if (entity->groupID == self->groupID) {
+			// FIXME: weigh this based on bounding box size,
+			// not just center-to-center range.
+			result.x += (entity->center.x - self->center.x);
+			result.y += (entity->center.y - self->center.y);
+			groupCount++;
+		}
+	}
+
+	if (!groupCount)
+		return;
+
+	result.x /= -groupCount;
+	result.y /= -groupCount;
+	Normalize(result);
+}
+
+//***************
+// CheckGroupWaypoint
+// flocking utility
+// determines if any nearby entity is headed toward the same waypoint as self, 
+// and if any of them is close enough to that waypoint, then clear all group-mates' 
+// currentWaypoint, hence moving the group onto its next waypoint
+// FIXME/BUG: not quite this logic, because if a bunch of entites have crowded the END WAYPOINT
+// then the local group will keep jostling to get there (problem? feature?)
+//***************
+bool CheckGroupWaypoint(std::vector<std::shared_ptr<GameObject_t>> & areaContents, std::shared_ptr<GameObject_t> & self) {
+
+	static std::vector<std::shared_ptr<GameObject_t>> group;
+
+	bool waypointHit = CheckWaypointRange(self);
+
+#if 0
+	for (auto && entity : areaContents) {
+		if (entity->groupID == self->groupID && !entity->path.empty() && entity->currentWaypoint == self->currentWaypoint) {
+
+			if (!waypointHit) {
+
+				// chache prior group-mates that weren't close enough, but that will need their waypoint cleared
+				group.push_back(entity);
+
+				// determine if an entity in the local group is close enough to a shared waypoint
+				if (waypointHit = CheckWaypointRange(entity)) {
+					for (auto && groupmate : group) {
+						groupmate->path.pop_back();
+						groupmate->velocity = vec2zero;
+						groupmate->currentWaypoint = &groupmate->origin;
+					}
+				}
+			} else {
+				entity->path.pop_back();
+				entity->velocity = vec2zero;
+				entity->currentWaypoint = &entity->origin;
+			}
+		}
+	}
+#endif
+
+	if (waypointHit) {
+		self->path.pop_back();
+		self->velocity = vec2zero;
+		self->currentWaypoint = &self->origin;
+	}
+
+	group.clear();
+	return waypointHit;
+}
+
+// END FREEHILL flocking test
+///////////////////////////////////////////////////////////////////////////////////////////////
 
 //***************
 // TranslateRect
 // dynamic pathfinding utility
 //***************
-void TranslateRect(SDL_Rect & target, float dx, float dy) {
-	target = {	(int)nearbyintf(target.x + dx),
-				(int)nearbyintf(target.y + dy),
-				target.w,
-				target.h };
+SDL_Rect TranslateRect(const SDL_Rect & target, const Vec2_t & v) {
+	return SDL_Rect {	(int)nearbyintf(target.x + v.x),
+						(int)nearbyintf(target.y + v.y),
+						target.w,
+						target.h	};
 }
 
 //******************
@@ -1024,15 +1212,41 @@ void Rotate(bool clockwise, float & targetX, float & targetY) {
 }
 
 //***************
-// Redirect
-// dynamic pathfinding
+// CheckOverlap
+// dynamic pathfinding utility
 //***************
-void Redirect(std::shared_ptr<GameObject_t> & entity, std::vector<SDL_Rect *> & areaContents) {
-	// perform a modified A* that generates N (8-360) neighboring rectangles then does g,h,f cost with the
-	// next waypoint as the goal, and the heuristic does the same 14/10 evaluation based on
-	// the rect's x/y center difference from the goal divided by entity->speed
-	// note: get the rects by rotating and translating the entity->bounds according to speed
-	// and add **copies** to a vector (instead of references because these rects won't exist on the next iteration)
+bool CheckOverlap(const SDL_Rect & a, const SDL_Rect & b) {
+	int t;
+	if ((t = a.x - b.x) > b.w || -t > a.w) return false;
+	if ((t = a.y - b.y) > b.h || -t > a.h) return false;
+	return true;
+}
+
+//***************
+// RegulateSpeed
+// dynamic pathfinding utility
+//***************
+Vec2_t RegulateSpeed(std::vector<std::shared_ptr<GameObject_t>> & areaContents, std::shared_ptr<GameObject_t> & self) {
+
+	// loop over each local non-self entity testing for collision
+	// and determine the minimum distance travellable along the current velocity
+	for (float speed = self->speed; speed > 0; speed--) {
+		Vec2_t move = self->velocity * speed;
+		SDL_Rect testBounds = TranslateRect(self->bounds, move);
+
+		bool collision = false;
+		for (auto && entity : areaContents) {
+			if (CheckOverlap(testBounds, entity->bounds)) {
+				collision = true;
+				break;
+			}
+		}
+
+		if (!collision)
+			return move;
+	}
+
+	return vec2zero;
 }
 
 //***************
@@ -1045,14 +1259,17 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 	if (dt >= 25 && !entity->path.empty()) {
 		entity->moveTime = SDL_GetTicks();
 
-		if (entity->currentWaypoint == &entity->origin)
+		// determine optimal velocity direction and speed 
+		// based on next waypoint and any possible entities headed to the same point
+		std::vector<std::shared_ptr<GameObject_t>> areaContents;
+		GetAreaContents((int)(entity->center.x / cellSize), (int)(entity->center.y / cellSize), areaContents, entity);
+
+		// FIXME/BUG: not quite this logic, because CheckGroupWaypoint sets everyone's waypoint to origin if anyone was close
+		if (!CheckGroupWaypoint(areaContents, entity)) {
+
 			entity->currentWaypoint = &entity->path.back()->center;
-
-		// set velocity based on next point in path
-		if (!CheckWaypointRange(entity, *entity->currentWaypoint)) {
-
 // BEGIN FREEHILL path cell traversal and update test
-			
+/*		
 			// move along the path from entity to goal to determine if the path needs updating
 			// if so, then update the entire path (ie clear and reset it, for now)
 			bool pathChanged;
@@ -1066,7 +1283,7 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 						for (auto && newGoal : entity->path) {
 							// move along the path from goal to entity to determine the new goal
 							if (EMPTY_EXCEPT_SELF((*newGoal), entity))
-								pathChanged = PathFind(entity, SDL_Point{ (int)entity->centerX, (int)entity->centerY }, newGoal->center);
+								pathChanged = PathFind(entity, SDL_Point{ (int)entity->center.x, (int)entity->center.y }, newGoal->center);
 							if (pathChanged || entity->path.empty())
 								break;
 						}
@@ -1075,14 +1292,29 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 						break;
 				}
 			} while (pathChanged && !entity->path.empty());
+*/
 // END FREEHILL path cell traversal and update test
 
+												
+// BEGIN FREEHILL flocking test
+
 			// determine the intended movement direction
-			float waypointVX = (float)(entity->currentWaypoint->x - entity->centerX);
-			float waypointVY = (float)(entity->currentWaypoint->y - entity->centerY);
-			Normalize(waypointVX, waypointVY);
-			entity->velX = waypointVX;
-			entity->velY = waypointVY;
+			Vec2_t waypointVec = { (float)(entity->currentWaypoint->x - entity->center.x),
+									(float)(entity->currentWaypoint->y - entity->center.y) };
+			Normalize(waypointVec);
+			entity->velocity = waypointVec;		// FIXME: not quite for flocking, all entities wind up jostling for the same waypoint
+
+/*
+			Vec2_t alignment, cohesion, separation;
+			GetGroupAlignment(areaContents, entity, alignment);
+			GetGroupCohesion(areaContents, entity, cohesion);
+			GetGroupSeparation(areaContents, entity, separation);
+			entity->velocity += separation + alignment + cohesion;
+			Normalize(entity->velocity);
+*/
+// END FREEHILL flocking test
+
+// BEGIN FREEHILL collision sweep test
 /*
 			// cache references to neighboring cells' contents
 			std::vector<SDL_Rect *> areaContents;
@@ -1165,16 +1397,11 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 				entity->velY = 0.0f;
 			}
 */
-		} else {		
-			// close enough to a waypoint or no waypoints available
-			entity->path.pop_back();
-			entity->velX = 0.0f;
-			entity->velY = 0.0f;
-			entity->currentWaypoint = &entity->origin;
-		}
-		UpdateOrigin(entity);
+// END FREEHILL collision sweep test
+		} 
+		UpdateOrigin(entity, RegulateSpeed(areaContents, entity));
 		// if the entity moved, then update gameGrid and internal cell lists for collision filtering
-		if (entity->velX || entity->velY)
+		if (entity->velocity.x || entity->velocity.y)
 			UpdateCellReferences(entity);
 
 		UpdateBob(entity);		// DEBUG: bob does not affect cell location
@@ -1335,7 +1562,8 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 					// TODO: call based on a current group/individual selection
 					// and loop over that (regardless of orders)
 					for (auto && entity : entities) {
-						PathFind(entity, SDL_Point{ (int)entity->centerX, (int)entity->centerY }, second);
+						entity->groupID = 1;		// DEBUG: for flocking behavior
+						PathFind(entity, SDL_Point{ (int)entity->center.x, (int)entity->center.y }, second);
 					}
 					break;
 				}
