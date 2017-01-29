@@ -27,7 +27,7 @@ typedef enum {
 	DEBUG_DRAW_PATH = BIT(1)
 } DebugFlags_t;
 
-Uint16 debugState = DEBUG_DRAW_PATH; // DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH;
+Uint16 debugState =  DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH;
 
 //***************
 // DebugCheck
@@ -84,6 +84,14 @@ typedef struct Vec2_s {
 		x += rhs.x;
 		y += rhs.y;
 		return *this;
+	}
+
+	bool operator==(const Vec2_s & rhs) {
+		return x == rhs.x && y == rhs.y;
+	}
+
+	bool operator!=(const Vec2_s & rhs) {
+		return !(*this == rhs);
 	}
 
 } Vec2_t;
@@ -1023,7 +1031,7 @@ void UpdateCellReferences(std::shared_ptr<GameObject_t> & entity) {
 // dynamic pathfinding utility
 // queries area dynamic contents
 //***************
-void GetAreaContents(const int centerRow, const int centerCol, std::vector<std::shared_ptr<GameObject_t>> & result, std::shared_ptr<GameObject_t> & ignore) {
+void GetAreaContents(const int centerRow, const int centerCol, std::vector<std::shared_ptr<GameObject_t>> & areaEntities, std::vector<SDL_Rect *> & areaObstacles, std::shared_ptr<GameObject_t> & ignore) {
 
 	static std::vector<int> idList;
 
@@ -1042,11 +1050,12 @@ void GetAreaContents(const int centerRow, const int centerCol, std::vector<std::
 						// DEBUG: don't add the same entity twice for those over multiple cells
 						auto & checkID = std::find(idList.begin(), idList.end(), entity->guid);
 						if (checkID == idList.end()) {
-							result.push_back(entity);
+							areaEntities.push_back(entity);
 							idList.push_back(entity->guid);
 						}
 					}
-
+				} else {
+					areaObstacles.push_back(&target.bounds);
 				}
 			}
 		}
@@ -1217,7 +1226,7 @@ SDL_Rect TranslateRect(const SDL_Rect & target, const Vec2_t & v) {
 // if clockwise == false, it rotates the target values counter-clockwise
 // --only deals with unit length quaternions--
 //******************
-void Rotate(bool clockwise, float & targetX, float & targetY) {
+void Rotate(bool clockwise, Vec2_t & result) {
 #define DEG2RAD(angle) ( angle * ((float)(M_PI)/180.0f) )
 	static const float ccw[]	= { 0.0f, 0.0f, SDL_sinf(DEG2RAD(1.0f) / 2.0f), SDL_cosf(DEG2RAD(1.0f) / 2.0f) };
 	static const float cw[]		= { 0.0f, 0.0f, SDL_sinf(DEG2RAD(-1.0f) / 2.0f), SDL_cosf(DEG2RAD(-1.0f) / 2.0f) };
@@ -1235,11 +1244,11 @@ void Rotate(bool clockwise, float & targetX, float & targetY) {
 	float xy2 = r[0]*r[1]*2.0f;
 	float zw2 = r[2]*r[3]*2.0f;
 
-	float oldX = targetX;
-	float oldY = targetY;
+	float oldX = result.x;
+	float oldY = result.y;
 
-	targetX = (xxzz + wwyy)*oldX + (xy2 - zw2)*oldY;
-	targetY = (xy2 + zw2)*oldX + (r[1]*r[1] + r[3]*r[3] - r[0]*r[0] - r[2]*r[2])*oldY;
+	result = {	(xxzz + wwyy)*oldX + (xy2 - zw2)*oldY,
+				(xy2 + zw2)*oldX + (r[1]*r[1] + r[3]*r[3] - r[0]*r[0] - r[2]*r[2])*oldY };
 }
 
 //***************
@@ -1273,7 +1282,7 @@ void CheckPathCell(std::shared_ptr<GameObject_t> & entity) {
 // RegulateSpeed
 // dynamic pathfinding utility
 //***************
-Vec2_t RegulateSpeed(std::vector<std::shared_ptr<GameObject_t>> & areaContents, std::shared_ptr<GameObject_t> & self) {
+float RegulateSpeed(std::vector<std::shared_ptr<GameObject_t>> & areaEntities, std::vector<SDL_Rect *> & areaObstacles, std::shared_ptr<GameObject_t> & self) {
 
 	// loop over each local non-self entity testing for collision
 	// and determine the minimum distance travellable along the current velocity
@@ -1282,18 +1291,28 @@ Vec2_t RegulateSpeed(std::vector<std::shared_ptr<GameObject_t>> & areaContents, 
 		SDL_Rect testBounds = TranslateRect(self->bounds, move);
 
 		bool collision = false;
-		for (auto && entity : areaContents) {
+		for (auto && entity : areaEntities) {
 			if (CheckOverlap(testBounds, entity->bounds)) {
 				collision = true;
 				break;
 			}
 		}
 
+		if (collision)
+			continue;
+
+		for (auto && obstacle : areaObstacles) {
+			if (CheckOverlap(testBounds, *obstacle)) {
+				collision = true;
+				break;
+			}
+		}
+
 		if (!collision)
-			return move;
+			return speed;
 	}
 
-	return vec2zero;
+	return 0;
 }
 
 //***************
@@ -1301,6 +1320,9 @@ Vec2_t RegulateSpeed(std::vector<std::shared_ptr<GameObject_t>> & areaContents, 
 // dynamic pathfinding
 //***************
 void Move(std::shared_ptr<GameObject_t> & entity) {
+	static std::vector<std::shared_ptr<GameObject_t>> areaEntities;
+	static std::vector<SDL_Rect *> areaObstacles;
+
 	Uint32 dt = SDL_GetTicks() - entity->moveTime;
 
 	if (dt >= 25) {
@@ -1332,8 +1354,7 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 
 		// determine optimal velocity direction and speed 
 		// based on (next waypoint or local velocity gradient) and any possible entities headed to the same point
-		std::vector<std::shared_ptr<GameObject_t>> areaContents;
-		GetAreaContents((int)(entity->center.x / cellSize), (int)(entity->center.y / cellSize), areaContents, entity);
+		GetAreaContents((int)(entity->center.x / cellSize), (int)(entity->center.y / cellSize), areaEntities, areaObstacles, entity);
 		
 		if (!entity->path.empty()) {	//		if (!CheckGroupWaypoint(areaContents, entity)) {
 
@@ -1359,111 +1380,65 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 
 												
 // BEGIN FREEHILL flocking test
-/**/
+/*
 			// FIXME: dont use specific waypoints because entities wind up jostling for the same waypoint
 			// FIXME: these steering forces need to be better balanced so they dont cancel eachother out all the time
 			Vec2_t alignment, cohesion, separation;
-			GetGroupAlignment(areaContents, entity, alignment);
+			GetGroupAlignment(areaEntities, entity, alignment);
 //			GetGroupCohesion(areaContents, entity, cohesion);
 //			GetGroupSeparation(areaContents, entity, separation);
 			entity->velocity += alignment;	// separation + alignment + cohesion;
 			Normalize(entity->velocity);
-
-// END FREEHILL flocking test
-
-// BEGIN FREEHILL collision sweep test
-/*
-			// cache references to neighboring cells' contents
-			std::vector<SDL_Rect *> areaContents;
-			GetAreaContents((int)(entity->centerX / cellSize), (int)(entity->centerY / cellSize), areaContents, entity);
-
-			// check for collision at next step along the static path
-			SDL_Rect testBounds = entity->bounds;
-			TranslateRect(testBounds, entity->speed * waypointVX, entity->speed * waypointVY);
-			bool hit = false;
-			SDL_Rect * hitObstacle = nullptr;
-			for (auto && obstacle : areaContents) {
-				if (SDL_HasIntersection(obstacle, &testBounds)) {
-					hitObstacle = obstacle;
-					hit = true;
-					break;
-				}
-			}
-
-//			if (hit) {
-//				Redirect(entity, areaContents);
-//			}
-
-
-			// there's a dynamic obstacle in the way
-			// find a vector that circumnavigates it
-			if (hit) {
-				// calculate center-to-center non-normalized vector once
-				// to set the initial rotation direction
-				int dx = (testBounds.x + (testBounds.w / 2)) - (hitObstacle->x + (hitObstacle->w / 2));
-				int dy = (testBounds.y + (testBounds.h / 2)) - (hitObstacle->y + (hitObstacle->h / 2));
-				bool rotationDir;
-				if (waypointVX < waypointVY) {								// entity is heading mostly vertically
-					rotationDir = dx < 0 ? CLOCKWISE : COUNTER_CLOCKWISE;	// use x-misalignment
-				} else {													// entity is heading mostly horizontally
-					rotationDir = dy < 0 ? CLOCKWISE : COUNTER_CLOCKWISE;	// use y-misalignment
-				}
-
-				// rotate one way, then the other, from center
-				for (int flip = 0; flip < 2; flip++) {
-					if (flip) {
-						rotationDir = !rotationDir;
-						entity->velX = waypointVX;
-						entity->velY = waypointVY;
-					}
-
-					// set the tangent vector perpendicular to entity's velocity
-					// to rotate the testBounds that's one step forward
-					// about entity->bounds' center
-					hit = false;
-					for (int rotationAngle = 1; rotationAngle < 180; rotationAngle++) {	// DEBUG: Rotate(...) uses a 1.0f degree rotation, hence rotationAngle++ and not +=angleIncrement
-						testBounds = entity->bounds;
-						Rotate(rotationDir, entity->velX, entity->velY);
-						TranslateRect(testBounds, entity->speed * entity->velX, entity->speed * entity->velY);
-
-						// check for collision
-						for (auto && obstacle : areaContents) {
-//							DrawRect(*obstacle, opaqueGreen, false);
-//							DrawRect(testBounds, opaqueGreen, true);
-//							SDL_RenderPresent(renderer);
-							if (SDL_HasIntersection(obstacle, &testBounds)) {
-								hit = true;
-								break;
-							}
-						}
-						if (!hit)
-							break;
-					}
-					// push a temporary waypoint to track
-					if (!hit) {
-//						entity->path.push_back(SDL_Point{ testBounds.x + (testBounds.w / 2), testBounds.y + (testBounds.h / 2) });
-//						entity->currentWaypoint = &entity->path.back();
-						break;
-					}
-				}
-			}
-
-			// no free space in a 180/360 degree forward arc this frame
-			if (hit) {
-				entity->velX = 0.0f;
-				entity->velY = 0.0f;
-			}
 */
-// END FREEHILL collision sweep test
+// END FREEHILL flocking test
 		} 
-		Vec2_t move = RegulateSpeed(areaContents, entity);
+		
+		float speed;
+		if ((speed = RegulateSpeed(areaEntities, areaObstacles, entity)) == 0){
+			Vec2_t oldVelocity = entity->velocity;
+			
+			float bestWeight = 0.0f;
+			float bestSpeed = 0.0f;
+			Vec2_t bestVelocity = vec2zero;
+			bool direction;
+				
+			// check several rotated velocities in a 180 degree forward arc
+			// attempting to find the most movement in the desired direction
+			// if they all fail, then go with vec2zero
+			for (int flip = 0; flip < 2; flip++) {
+				if (flip == 0)
+					direction = COUNTER_CLOCKWISE;
+				else
+					direction = CLOCKWISE;
+
+				for (int angle = 0; angle < 90; angle++) {
+					Rotate(direction, entity->velocity);
+					speed = RegulateSpeed(areaEntities, areaObstacles, entity);
+
+					float weight = (entity->velocity * oldVelocity);		// DEBUG: 180 forward arc ensures [0,1] dot product
+					if (speed > bestSpeed && weight >= bestWeight) {
+						bestWeight = weight;
+						bestSpeed = speed;
+						bestVelocity = entity->velocity;
+					}
+				}
+				entity->velocity = oldVelocity;
+			}
+
+			entity->velocity = bestVelocity;
+			speed = bestSpeed;
+		}
+
+		Vec2_t move = entity->velocity * speed;
 		UpdateOrigin(entity, move);
 		// if the entity moved, then update gameGrid and internal cell lists for collision filtering
 		if (move.x || move.y)
 			UpdateCellReferences(entity);
 
 		UpdateBob(entity, move);		// DEBUG: bob does not affect cell location
-	}	
+	}
+	areaEntities.clear();
+	areaObstacles.clear();
 }
 
 //***************
