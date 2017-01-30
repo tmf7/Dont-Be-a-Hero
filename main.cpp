@@ -27,7 +27,7 @@ typedef enum {
 	DEBUG_DRAW_PATH = BIT(1)
 } DebugFlags_t;
 
-Uint16 debugState =  DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH;
+Uint16 debugState = DEBUG_DRAW_PATH; // DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH;
 
 //***************
 // DebugCheck
@@ -133,7 +133,7 @@ struct {
 } gameGrid;
 
 // selection
-std::vector<GridCell_t *> selection;	// all interior and border cells of selected area
+std::vector<std::shared_ptr<GameObject_t>> groupSelection;	// includes all monsters in interior and border cells of selected area
 
 // ObjectType_t
 typedef enum {
@@ -141,7 +141,8 @@ typedef enum {
 	OBJECTTYPE_GOODMAN,
 	OBJECTTYPE_MELEE,
 	OBJECTTYPE_RANGED,
-	OBJECTTYPE_MISSILE
+	OBJECTTYPE_MISSILE,
+	OBJECTTYPE_SELECTED
 } ObjectType_t;
 
 // GameObject_t
@@ -156,7 +157,8 @@ typedef struct GameObject_s {
 	bool			bobMaxed;		// peak bob height, return to 0
 	Uint32			moveTime;		// delay between move updates
 
-	int				facing;			// left or right to determine flip
+	SDL_RendererFlip	facing;			// left or right to determine flip
+
 	int				health;			// health <= 0 rotates sprite 90 and color-blends gray, hit color-blends red
 	int				stamina;		// subtraction color-blends blue for a few frames, stamina <= 0 blinks blue until full
 	bool			damaged;
@@ -166,9 +168,8 @@ typedef struct GameObject_s {
 	ObjectType_t	type;			// for faster Think calls
 	std::string		name;			// globally unique name (substring can be used for spriteSheet.frameAtlas)
 	int				guid;			// globally unique identifier amongst all entites (by number)
-	int				groupID;		// entity-group this belongs to (for flocking behavior)
+	int				groupID;		// selected-group this belongs to
 
-	SDL_Point *						currentWaypoint;
 	std::vector<GridCell_t *>		path;				// A* pathfinding results
 	std::vector<GridCell_t *>		cells;				// currently occupied gameGrid.cells indexes (between 1 and 4)
 	bool							onPath;				// if the entity is on the back tile of its path
@@ -184,16 +185,16 @@ typedef struct GameObject_s {
 			bob(0),
 			bobMaxed(false),
 			moveTime(0),
-			facing(false),
+			facing(SDL_FLIP_NONE),
 			blinkTime(0),
 			health(0),
 			stamina(0),
 			damaged(false),
 			fatigued(false),
 			type(OBJECTTYPE_INVALID),
-			guid(-1) {
-			currentWaypoint = &origin;
-			onPath = false;
+			guid(-1),
+			onPath(false),
+			groupID (OBJECTTYPE_INVALID) {
 	};
 
 	GameObject_s(const SDL_Point & origin,  const std::string & name, const int guid, ObjectType_t type) 
@@ -203,30 +204,31 @@ typedef struct GameObject_s {
 			bob(0),
 			bobMaxed(false),
 			moveTime(0),
-			facing(rand() % 2),
+			facing(SDL_FLIP_NONE),
 			blinkTime(0),
 			damaged(false),
 			fatigued(false),
 			type(type),
-			guid(guid) {
-		currentWaypoint = &(this->origin);
-		onPath = false;
-		bounds = {origin.x + 4, origin.y + 4, 8, 16 };
-		center.x = (float)bounds.x + (float)bounds.w / 2.0f;
-		center.y = (float)bounds.y + (float)bounds.h / 2.0f;
+			guid(guid),
+			onPath(false),
+			groupID(OBJECTTYPE_INVALID) {
 		switch (type) {
 			case OBJECTTYPE_GOODMAN:
+				bounds = { origin.x + 4, origin.y + 4, 14, 16 };
 				health = 100;
 				stamina = 100;
 				speed = 4;
+				groupID = OBJECTTYPE_GOODMAN;
 				break; 
 			case OBJECTTYPE_MELEE:
 			case OBJECTTYPE_RANGED: 
+				bounds = { origin.x, origin.y + 4, 14, 16 };
 				health = 2;
 				stamina = -1;
 				speed = 2;
 				break;
 			case OBJECTTYPE_MISSILE: 
+				bounds = { origin.x + 4, origin.y + 4, 8, 16 };
 				health = 1;
 				stamina = -1;
 				speed = 3;
@@ -237,6 +239,8 @@ typedef struct GameObject_s {
 				speed = 0;
 				break;
 		}
+		center.x = (float)bounds.x + (float)bounds.w / 2.0f;
+		center.y = (float)bounds.y + (float)bounds.h / 2.0f;
 	};
 } GameObject_t;
 
@@ -282,15 +286,6 @@ void DrawCollision() {
 		for (auto && cell : arry)
 			if (cell.solid)
 				DrawRect(cell.bounds, opaqueGreen, false);
-}
-
-//***************
-// DrawSelection
-// DEBUG: inefficient debug draw check
-//***************
-void DrawSelection() {
-	for (auto && cell : selection)
-		DrawRect(cell->bounds, opaqueGreen, false);
 }
 
 //***************
@@ -341,42 +336,80 @@ void DrawPath(std::shared_ptr<GameObject_t> & entity) {
 void DrawEntities() {
 
 	// inefficient draw-order sort according to y-position
-	// makes a copy of all entity pointers to prevent
-	// invalidating the entityAtlas
-	std::vector<std::shared_ptr<GameObject_t>> drawEntities(entities);
+	// makes a copy of all entity pointers to prevent invalidating the entityAtlas
+	// TODO: make missiles a separate vector thats unsorted and always drawn last
+	static std::vector<std::shared_ptr<GameObject_t>> drawEntities(entities);
 	std::sort(	drawEntities.begin(), 
 				drawEntities.end(), 
 				[](auto && a, auto && b) { 
-					return a->origin.y < b->origin.y;
+					if (a->origin.y < b->origin.y)
+						return true;
+					else if (a->origin.y == b->origin.y && a->guid < b->guid)	// DEBUG: secondary sort by guid to prevent flicker
+						return true;
+					return false;
 				}	
 	);
 
+	// draw all highlights of selected group first
+	// TODO: and all other highlights
 	for (auto && entity : drawEntities) {
+
+		if (entity->groupID == OBJECTTYPE_SELECTED) {
+			SDL_Rect & h_srcRect = spriteSheet.frames[spriteSheet.frameAtlas["highlight"]];
+			SDL_Rect h_dstRect = { entity->bounds.x - 4, entity->bounds.y - 4, h_srcRect.w + 8, h_srcRect.h + 8 };
+
+			// TODO: set the highlight color  if the entity is headed in for an attack (regardless of group) (make the source white again)
+
+			SDL_RenderCopy(renderer, spriteSheet.texture, &h_srcRect, &h_dstRect);
+		}
+/*
+		// reset texture mods to draw sprite
+		SDL_SetTextureColorMod(	spriteSheet.texture,
+								spriteSheet.defaultMod.r,
+								spriteSheet.defaultMod.g,
+								spriteSheet.defaultMod.b	);
+		SDL_SetTextureAlphaMod(spriteSheet.texture, spriteSheet.defaultMod.a);
+		SDL_SetTextureBlendMode(spriteSheet.texture, SDL_BLENDMODE_BLEND);
+*/
+	}
+
+	for (auto && entity : drawEntities) {
+
 		// get the drawing frames
 		int offset = entity->name.find_first_of('_');
 		std::string spriteName = entity->name.substr(0, offset);
 		SDL_Rect & srcRect = spriteSheet.frames[spriteSheet.frameAtlas[spriteName]];
 		SDL_Rect dstRect = { entity->origin.x, entity->origin.y, srcRect.w, srcRect.h };
 
+		// set the left/right flip based on horizontal velocity
+		if (entity->velocity.x > 0)
+			entity->facing = SDL_FLIP_HORIZONTAL;
+		else
+			entity->facing = SDL_FLIP_NONE;
+
 		// set color and rotation modifiers
 		double angle = 0;
-		if (entity->blinkTime > SDL_GetTicks()) {
+		if (entity->blinkTime > SDL_GetTicks()) {	// override to blink if damaged or fatigued
 			const SDL_Color & mod = entity->damaged ? SDL_Color{ 239, 12, 14, SDL_ALPHA_OPAQUE } 
 													: (entity->fatigued ? SDL_Color{ 22, 125, 236, SDL_ALPHA_OPAQUE }
 																		: spriteSheet.defaultMod);
 			SDL_SetTextureColorMod(spriteSheet.texture, mod.r, mod.g, mod.b);
 		}
-		if (entity->health <= 0) {
+		if (entity->health <= 0) {					// override to rotated gray if dead
 			SDL_SetTextureColorMod(spriteSheet.texture, 128, 128, 128);
 			angle = entity->facing ? -90 : 90;
 		}
 
 		// draw one sprite, then reset modifiers
-		SDL_RenderCopyEx(renderer, spriteSheet.texture, &srcRect, &dstRect, angle, NULL, (SDL_RendererFlip)entity->facing);
+		SDL_RenderCopyEx(renderer, spriteSheet.texture, &srcRect, &dstRect, angle, NULL, entity->facing);
+
+		// reset texture mods for next sprite
 		SDL_SetTextureColorMod(	spriteSheet.texture, 
 								spriteSheet.defaultMod.r, 
 								spriteSheet.defaultMod.g, 
 								spriteSheet.defaultMod.b	);
+		SDL_SetTextureAlphaMod(spriteSheet.texture, spriteSheet.defaultMod.a);
+		SDL_SetTextureBlendMode(spriteSheet.texture, SDL_BLENDMODE_BLEND);
 
 		// draw collision box
 		if (DebugCheck(DEBUG_DRAW_COLLISION))
@@ -472,15 +505,23 @@ bool LoadSprites() {
 	if (!goodman)
 		return false;
 
+	SDL_Surface * highlight = IMG_Load("graphics/highlight.png");
+	if (!highlight) {
+		SDL_FreeSurface(goodman);
+		return false;
+	}
+
 	SDL_Surface * melee = IMG_Load("graphics/melee.png");
 	if (!melee) {
 		SDL_FreeSurface(goodman);
+		SDL_FreeSurface(highlight);
 		return false;
 	}
 
 	SDL_Surface * ranged = IMG_Load("graphics/ranged.png");
 	if (!ranged) {
 		SDL_FreeSurface(goodman);
+		SDL_FreeSurface(highlight);
 		SDL_FreeSurface(melee);
 		return false;
 	}
@@ -488,6 +529,7 @@ bool LoadSprites() {
 	SDL_Surface * missile = IMG_Load("graphics/missile.png");
 	if (!missile) {
 		SDL_FreeSurface(goodman);
+		SDL_FreeSurface(highlight);
 		SDL_FreeSurface(melee);
 		SDL_FreeSurface(ranged);
 		return false;
@@ -495,7 +537,7 @@ bool LoadSprites() {
 
 	// set width and height of spriteSheet for all sprites in a row
 	// DEBUG: hardcoded dimensions determined from manual image file comparision
-	int textureWidth = 64;
+	int textureWidth = 81;
 	int textureHeight = 32;
 
 	// initilize the grid texture
@@ -515,7 +557,7 @@ bool LoadSprites() {
 	// and copy the surface to the texture
 	SDL_Point origin = { 0, 0 };
 	SDL_Rect frame;
-	for (int index = 0; index < 4; index++) {
+	for (int index = 0; index < 5; index++) {
 		SDL_Surface * target;
 		std::string name;
 
@@ -524,11 +566,13 @@ bool LoadSprites() {
 			case 1: target = melee; name = "melee"; break;
 			case 2: target = ranged; name = "ranged"; break;
 			case 3: target = missile; name = "missile"; break;
+			case 4: target = highlight; name = "highlight"; break;
 			default: target = NULL; name = "invalid"; break;
 		}
 		frame = { origin.x, origin.y, target->w, target->h };
 		if (SDL_UpdateTexture(spriteSheet.texture, &frame, target->pixels, target->pitch)) {
 			SDL_FreeSurface(goodman);
+			SDL_FreeSurface(highlight);
 			SDL_FreeSurface(melee);
 			SDL_FreeSurface(ranged);
 			SDL_FreeSurface(missile);
@@ -543,15 +587,17 @@ bool LoadSprites() {
 		return false;
 
 	SDL_FreeSurface(goodman);
+	SDL_FreeSurface(highlight);
 	SDL_FreeSurface(melee);
 	SDL_FreeSurface(ranged);
 	SDL_FreeSurface(missile);
 
-	// cache the original color mod
+	// cache the original color and alpha mod
 	SDL_GetTextureColorMod(	spriteSheet.texture, 
 							&spriteSheet.defaultMod.r, 
 							&spriteSheet.defaultMod.g, 
 							&spriteSheet.defaultMod.b	);
+	SDL_GetTextureAlphaMod(spriteSheet.texture, &spriteSheet.defaultMod.a);
 	return true;
 }
 
@@ -584,7 +630,7 @@ void SpawnMonsters() {
 	srand(SDL_GetTicks());
 
 	// spawn all the monsters in one go
-	for (int count = 0; count < 20; count++) {
+	for (int count = 0; count < 10; count++) {
 		
 		SDL_Point spawnPoint;
 		bool invalidSpawnPoint = false;
@@ -595,7 +641,7 @@ void SpawnMonsters() {
 
 			// check the spawnPoint's resulting collision bounds' four corners,
 			// which will be over 1 - 4 gameGrid cells, doesn't overlap another entity, a solid cell, and is on the map area
-			SDL_Rect collideBounds = { spawnPoint.x + 4, spawnPoint.y + 4, 8, 16 };
+			SDL_Rect collideBounds = { spawnPoint.x, spawnPoint.y + 4, 14, 16 };
 			for (int corner = 0; corner < 4; corner++) {
 				SDL_Point testPoint;
 				switch (corner) {
@@ -819,7 +865,6 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 
 	if (endCell->solid || startCell == endCell) {
 		entity->path.clear();
-		entity->currentWaypoint = &entity->origin;
 		return false;
 	}
 	
@@ -855,8 +900,7 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 				currentCell = currentCell->parent;
 			}
 
-			// set the the local goal
-			entity->currentWaypoint = &entity->path.back()->center;
+			// the path starts on the entity's current cell
 			entity->onPath = true;
 
 			// ensure no GridCell_t conflicts on successive path searches
@@ -903,7 +947,6 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 	ClearSets(openSet, closedSet);
 
 	entity->path.clear();
-	entity->currentWaypoint = &entity->origin;
 	return false;		// DEBUG: this will be hit if an entity is surrounded by entities on its first search
 }
 
@@ -944,10 +987,11 @@ void UpdateBob(std::shared_ptr<GameObject_t> & entity, const Vec2_t & move) {
 //***************
 // CheckWaypointRange
 // used for dynamic pathfinding
+// DEBUG: never call with entity->path.empty()
 //***************
 bool CheckWaypointRange(std::shared_ptr<GameObject_t> & entity) {
-	int xRange = SDL_abs((int)(entity->center.x - entity->currentWaypoint->x));
-	int yRange = SDL_abs((int)(entity->center.y - entity->currentWaypoint->y));
+	int xRange = SDL_abs((int)(entity->center.x - entity->path.back()->center.x));
+	int yRange = SDL_abs((int)(entity->center.y - entity->path.back()->center.y));
 	return (xRange <= entity->speed && yRange <= entity->speed);
 }
 
@@ -967,16 +1011,16 @@ void Normalize(Vec2_t & v) {
 //***************
 // UpdateOrigin
 //***************
-void UpdateOrigin(std::shared_ptr<GameObject_t>  & entity, const Vec2_t & minMove) {
-	int dx = (int)nearbyintf(minMove.x);	// (int)nearbyintf(entity->speed * entity->velocity.x);
-	int dy = (int)nearbyintf(minMove.y);	// (int)nearbyintf(entity->speed * entity->velocity.y);
+void UpdateOrigin(std::shared_ptr<GameObject_t>  & entity, const Vec2_t & move) {
+	int dx = (int)nearbyintf(move.x);
+	int dy = (int)nearbyintf(move.y);
 
 	entity->origin.x += dx;
 	entity->origin.y += dy;
 	entity->bounds.x += dx;
 	entity->bounds.y += dy;
-	entity->center.x += nearbyintf(minMove.x);	// nearbyintf(entity->speed * entity->velocity.x);
-	entity->center.y += nearbyintf(minMove.y);	// nearbyintf(entity->speed * entity->velocity.y);
+	entity->center.x += nearbyintf(move.x);
+	entity->center.y += nearbyintf(move.y);
 }
 
 //***************
@@ -1153,57 +1197,6 @@ void GetGroupSeparation(std::vector<std::shared_ptr<GameObject_t>> & areaContent
 	Normalize(result);
 }
 
-//***************
-// CheckGroupWaypoint
-// flocking utility
-// determines if any nearby entity is headed toward the same waypoint as self, 
-// and if any of them is close enough to that waypoint, then clear all group-mates' 
-// currentWaypoint, hence moving the group onto its next waypoint
-// FIXME/BUG: not quite this logic, because if a bunch of entites have crowded the END WAYPOINT
-// then the local group will keep jostling to get there (problem? feature?)
-//***************
-bool CheckGroupWaypoint(std::vector<std::shared_ptr<GameObject_t>> & areaContents, std::shared_ptr<GameObject_t> & self) {
-
-	static std::vector<std::shared_ptr<GameObject_t>> group;
-
-	bool waypointHit = CheckWaypointRange(self);
-
-#if 0
-	for (auto && entity : areaContents) {
-		if (entity->groupID == self->groupID && !entity->path.empty() && entity->currentWaypoint == self->currentWaypoint) {
-
-			if (!waypointHit) {
-
-				// chache prior group-mates that weren't close enough, but that will need their waypoint cleared
-				group.push_back(entity);
-
-				// determine if an entity in the local group is close enough to a shared waypoint
-				if (waypointHit = CheckWaypointRange(entity)) {
-					for (auto && groupmate : group) {
-						groupmate->path.pop_back();
-						groupmate->velocity = vec2zero;
-						groupmate->currentWaypoint = &groupmate->origin;
-					}
-				}
-			} else {
-				entity->path.pop_back();
-				entity->velocity = vec2zero;
-				entity->currentWaypoint = &entity->origin;
-			}
-		}
-	}
-#endif
-
-	if (waypointHit) {
-		self->path.pop_back();
-		self->velocity = vec2zero;
-		self->currentWaypoint = &self->origin;
-	}
-
-	group.clear();
-	return waypointHit;
-}
-
 // END FREEHILL flocking test
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1254,6 +1247,7 @@ void Rotate(bool clockwise, Vec2_t & result) {
 //***************
 // CheckOverlap
 // dynamic pathfinding utility
+// AABB-AABB collision test
 //***************
 bool CheckOverlap(const SDL_Rect & a, const SDL_Rect & b) {
 	int t;
@@ -1281,33 +1275,32 @@ void CheckPathCell(std::shared_ptr<GameObject_t> & entity) {
 //***************
 // RegulateSpeed
 // dynamic pathfinding utility
+// tests self against local entities for collision
+// and set maximum speed along the current unit-velocity
 //***************
 float RegulateSpeed(std::vector<std::shared_ptr<GameObject_t>> & areaEntities, std::vector<SDL_Rect *> & areaObstacles, std::shared_ptr<GameObject_t> & self) {
-
-	// loop over each local non-self entity testing for collision
-	// and determine the minimum distance travellable along the current velocity
 	for (float speed = self->speed; speed > 0; speed--) {
 		Vec2_t move = self->velocity * speed;
 		SDL_Rect testBounds = TranslateRect(self->bounds, move);
 
 		bool collision = false;
+		// entity check
 		for (auto && entity : areaEntities) {
 			if (CheckOverlap(testBounds, entity->bounds)) {
 				collision = true;
 				break;
 			}
 		}
-
 		if (collision)
 			continue;
 
+		// static obstacle check
 		for (auto && obstacle : areaObstacles) {
 			if (CheckOverlap(testBounds, *obstacle)) {
 				collision = true;
 				break;
 			}
 		}
-
 		if (!collision)
 			return speed;
 	}
@@ -1352,85 +1345,98 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 */
 // END FREEHILL path cell traversal and update test
 
-		// determine optimal velocity direction and speed 
-		// based on (next waypoint or local velocity gradient) and any possible entities headed to the same point
+		// determine optimal unit-velocity and speed 
 		GetAreaContents((int)(entity->center.x / cellSize), (int)(entity->center.y / cellSize), areaEntities, areaObstacles, entity);
-		
-		if (!entity->path.empty()) {	//		if (!CheckGroupWaypoint(areaContents, entity)) {
+		Vec2_t move = vec2zero;
 
-			// DEBUG: always update velocity based on local gradient and local group alignment,
-			// but track directly towards the most recent waypoint if off-path,
-			// and once back on path start using the local gradient again
+		// if a nearby entity in the same group is closer to the goal and has stopped
+		// then stop moving, otherwise execute a velocity update
+		bool groupStopped = false;
+		for (auto && other : areaEntities) {
+			if (other->groupID == entity->groupID &&
+				SDL_abs((int)nearbyintf(entity->goal.x - other->center.x)) < SDL_abs((int)nearbyintf(entity->goal.x - entity->center.x)) &&
+				SDL_abs((int)nearbyintf(entity->goal.y - other->center.y)) < SDL_abs((int)nearbyintf(entity->goal.y - entity->center.y)) &&
+				other->velocity == vec2zero) {
+				groupStopped = true;
+				break;
+			}
+		}
+
+		if (!groupStopped && !entity->path.empty()) {
+
+			// head towards last waypoint if off-path,
+			// otherwise use the local gradient
 			CheckPathCell(entity);
-			if (entity->path.empty()) {
-				entity->velocity = vec2zero;
-			} else if (entity->onPath && entity->path.size() >= 2) {
+			if (entity->onPath && entity->path.size() >= 2) {
 				auto & from = entity->path.at(entity->path.size() - 1)->center;
 				auto & to = entity->path.at(entity->path.size() - 2)->center;
 				Vec2_t localGradient = { (float)(to.x - from.x), (float)(to.y - from.y) };
 				Normalize(localGradient);
 				entity->velocity = localGradient;
 			} else {
-				entity->currentWaypoint = &entity->path.back()->center;
-				Vec2_t waypointVec = {	(float)(entity->currentWaypoint->x - entity->center.x),
-										(float)(entity->currentWaypoint->y - entity->center.y)	};
-				Normalize(waypointVec);
-				entity->velocity = waypointVec;
+				auto & currentWaypoint = entity->path.back()->center;
+				if (!CheckWaypointRange(entity)) {
+					Vec2_t waypointVec = { (float)(currentWaypoint.x - entity->center.x),
+											(float)(currentWaypoint.y - entity->center.y) };
+					Normalize(waypointVec);
+					entity->velocity = waypointVec;
+				} else {
+					entity->path.clear();
+					entity->velocity = vec2zero;
+				}
 			}
-
-												
+									
 // BEGIN FREEHILL flocking test
 /*
 			// FIXME: dont use specific waypoints because entities wind up jostling for the same waypoint
 			// FIXME: these steering forces need to be better balanced so they dont cancel eachother out all the time
+			// FIXME: using this with gradient velocities throws entities off the end of the trail infinitely (until given a new path)
 			Vec2_t alignment, cohesion, separation;
 			GetGroupAlignment(areaEntities, entity, alignment);
-//			GetGroupCohesion(areaContents, entity, cohesion);
-//			GetGroupSeparation(areaContents, entity, separation);
-			entity->velocity += alignment;	// separation + alignment + cohesion;
+			GetGroupCohesion(areaEntities, entity, cohesion);
+			GetGroupSeparation(areaEntities, entity, separation);
+			entity->velocity +=  separation + alignment + cohesion;
 			Normalize(entity->velocity);
 */
 // END FREEHILL flocking test
-		} 
 		
-		float speed;
-		if ((speed = RegulateSpeed(areaEntities, areaObstacles, entity)) == 0){
-			Vec2_t oldVelocity = entity->velocity;
+			// FIXME: this whole sub-routine is a bottleneck to be optimized
+			float speed;
+			if (entity->velocity != vec2zero && (speed = RegulateSpeed(areaEntities, areaObstacles, entity)) == 0){
+				Vec2_t oldVelocity = entity->velocity;
 			
-			float bestWeight = 0.0f;
-			float bestSpeed = 0.0f;
-			Vec2_t bestVelocity = vec2zero;
-			bool direction;
+				float bestWeight = 0.0f;
+				float bestSpeed = 0.0f;
+				Vec2_t bestVelocity = vec2zero;
+				bool direction;
 				
-			// check several rotated velocities in a 180 degree forward arc
-			// attempting to find the most movement in the desired direction
-			// if they all fail, then go with vec2zero
-			for (int flip = 0; flip < 2; flip++) {
-				if (flip == 0)
-					direction = COUNTER_CLOCKWISE;
-				else
-					direction = CLOCKWISE;
+				// check a 180 degree forward arc maximizing movement along path
+				for (int flip = 0; flip < 2; flip++) {
+					if (flip == 0)
+						direction = COUNTER_CLOCKWISE;
+					else
+						direction = CLOCKWISE;
 
-				for (int angle = 0; angle < 90; angle++) {
-					Rotate(direction, entity->velocity);
-					speed = RegulateSpeed(areaEntities, areaObstacles, entity);
+					for (int angle = 0; angle < 90; angle++) {
+						Rotate(direction, entity->velocity);
+						speed = RegulateSpeed(areaEntities, areaObstacles, entity);
 
-					float weight = (entity->velocity * oldVelocity);		// DEBUG: 180 forward arc ensures [0,1] dot product
-					if (speed > bestSpeed && weight >= bestWeight) {
-						bestWeight = weight;
-						bestSpeed = speed;
-						bestVelocity = entity->velocity;
+						float weight = (entity->velocity * oldVelocity);
+						if (speed > bestSpeed && weight >= bestWeight) {
+							bestWeight = weight;
+							bestSpeed = speed;
+							bestVelocity = entity->velocity;
+						}
 					}
+					entity->velocity = oldVelocity;
 				}
-				entity->velocity = oldVelocity;
+				entity->velocity = bestVelocity;
+				speed = bestSpeed;
 			}
-
-			entity->velocity = bestVelocity;
-			speed = bestSpeed;
+			move = entity->velocity * speed;
+			UpdateOrigin(entity, move);
 		}
 
-		Vec2_t move = entity->velocity * speed;
-		UpdateOrigin(entity, move);
 		// if the entity moved, then update gameGrid and internal cell lists for collision filtering
 		if (move.x || move.y)
 			UpdateCellReferences(entity);
@@ -1501,10 +1507,13 @@ void Think() {
 }
 
 //***************
-// SelectArea
+// SelectGroup
 // monster selection
 //***************
-void SelectArea(SDL_Point & first, SDL_Point & second) {
+void SelectGroup(SDL_Point & first, SDL_Point & second) {
+
+	static std::vector<int> idList;
+
 	int firstRow	= first.x / cellSize;
 	int firstCol	= first.y / cellSize;
 	int secondRow	= second.x / cellSize;
@@ -1526,19 +1535,39 @@ void SelectArea(SDL_Point & first, SDL_Point & second) {
 	int startCol	= (firstCol < secondCol) ? firstCol : secondCol;
 	int endCol		= (startCol == firstCol) ? secondCol : firstCol;
 
-	// build the list of selected cells to search
-	// OR literally just search each cells contents for monsters/goodman
+	// add all monsters in the selected area to a group
 	for (int row = startRow; row <= endRow; row++) {
-		for(int col = startCol; col <= endCol; col++)
-		selection.push_back(&gameGrid.cells[row][col]);
+		for (int col = startCol; col <= endCol; col++) {
+			auto & target = gameGrid.cells[row][col];
+			if (!target.solid) {
+
+				for (auto && entity : target.contents) {
+					if (entity->health <= 0)
+						continue;
+					if (entity->type != OBJECTTYPE_MELEE && entity->type != OBJECTTYPE_RANGED)
+						continue;
+
+					// DEBUG: don't add the same entity twice for those over multiple cells
+					auto & checkID = std::find(idList.begin(), idList.end(), entity->guid);
+					if (checkID == idList.end()) {
+						entity->groupID = OBJECTTYPE_SELECTED;
+						groupSelection.push_back(entity);
+						idList.push_back(entity->guid);
+					}
+				}
+			}
+		}
 	}
+	idList.clear();
 }
 
 //***************
-// ClearAreaSelection
+// ClearGroupSelection
 //***************
-void ClearAreaSelection() {
-	selection.clear();
+void ClearGroupSelection() {
+	for (auto && entity : groupSelection)
+		entity->groupID = OBJECTTYPE_INVALID;
+	groupSelection.clear();
 }
 
 //-------------------------------------END PER-FRAME FUNCTIONS-----------------------------------------//
@@ -1573,6 +1602,11 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 					running = false;
 					break;
 				}
+				case SDL_KEYDOWN: {
+					if (event.key.keysym.scancode == SDL_SCANCODE_SPACE)
+						ClearGroupSelection();
+					break;
+				}
 				case SDL_MOUSEMOTION: {
 					mouseX = event.motion.x;
 					mouseY = event.motion.y;
@@ -1580,24 +1614,23 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 					break;
 				}
 				case SDL_MOUSEBUTTONDOWN: {
-					first = { event.button.x, event.button.y };
-					beginSelection = true;
-					ClearAreaSelection();
+					if (groupSelection.empty()) {
+						first = { event.button.x, event.button.y };
+						beginSelection = true;
+					} 
 					break;
 				}
 				case SDL_MOUSEBUTTONUP: {
 					if (beginSelection) {
 						beginSelection = false;
-						SelectArea(first, second);
-					}
-
-					// test A* pathfinding
-					// TODO: call based on a current group/individual selection
-					// and loop over that (regardless of orders)
-					for (auto && entity : entities) {
-						entity->groupID = 1;		// DEBUG: group behavior test (sort of)
-						entity->goal = second;
-						PathFind(entity, SDL_Point{ (int)entity->center.x, (int)entity->center.y }, second);
+						SelectGroup(first, second);
+					} else if (!groupSelection.empty()) {
+						// group A* pathfinding
+						// DEBUG: only control one group at a time
+						for (auto && entity : groupSelection) {
+							entity->goal = second;
+							PathFind(entity, SDL_Point{ (int)entity->center.x, (int)entity->center.y }, second);
+						}
 					}
 					break;
 				}
@@ -1637,12 +1670,9 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 			DrawRect(hover, transparentGray, true);
 		}
 
-		// draw either the selection box
-		// or the currently selected cells
+		// draw the selection box
 		if (beginSelection)
 			DrawRect(SDL_Rect{ first.x, first.y, second.x - first.x, second.y - first.y }, opaqueGreen, false);
-		else
-			DrawSelection();
 
 		SDL_RenderPresent(renderer);
 		// end drawing
