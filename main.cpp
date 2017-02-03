@@ -21,13 +21,17 @@ const SDL_Color transparentGray = { 0, 0, 0, 64 };
 const SDL_Color opaqueGreen = { 0, 255, 0, 255 };
 const SDL_Color opaqueRed = { 255, 0, 0, 255 };
 
+constexpr const Uint32 fps = 30;
+constexpr const Uint32 frameTime = 1000 / fps;	// frame-rate governing (rounded from 33.33ms to 33 ms per frame)
+
 // debugging info
 typedef enum {
-	DEBUG_DRAW_COLLISION = BIT(0),
-	DEBUG_DRAW_PATH = BIT(1)
+	DEBUG_DRAW_COLLISION	= BIT(0),
+	DEBUG_DRAW_PATH			= BIT(1),
+	DEBUG_DRAW_OCCUPANCY	= BIT(2)
 } DebugFlags_t;
 
-Uint16 debugState = DEBUG_DRAW_PATH; // DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH;
+Uint16 debugState = DEBUG_DRAW_PATH | DEBUG_DRAW_COLLISION;	// DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH | DEBUG_DRAW_OCCUPANCY;
 
 //***************
 // DebugCheck
@@ -61,6 +65,11 @@ typedef struct Vec2_s {
 
 	float & operator[](const int index) {
 		return (&x)[index];
+	}
+
+	// negation
+	Vec2_s operator-() const {	
+		return { -x, -y };
 	}
 
 	Vec2_s operator*(const float & scale) const {
@@ -97,6 +106,27 @@ typedef struct Vec2_s {
 } Vec2_t;
 
 Vec2_t vec2zero = { 0.0f, 0.0f };
+
+//*****************
+// GetAngle
+// math helper function
+// returns the angle in degrees from the vector components
+// DEBUG: assumes the vector is normalized
+//*****************
+float GetAngle(const Vec2_t & v) {
+	float angle = 0.0f;
+	if (v.x == 0 && v.y > 0) {
+		angle = 90.0f;
+	} else if (v.x == 0 && v.y < 0) {
+		angle = 270.0f;
+	} else {
+		float tan = v.y / v.x;
+		angle = RAD2DEG(atanf(tan));
+		if (v.x < 0)
+			angle += 180.0f;
+	}
+	return angle;
+}
 
 // forward declaration of GameObject_t
 typedef struct GameObject_s GameObject_t;
@@ -141,8 +171,7 @@ typedef enum {
 	OBJECTTYPE_GOODMAN,
 	OBJECTTYPE_MELEE,
 	OBJECTTYPE_RANGED,
-	OBJECTTYPE_MISSILE,
-	OBJECTTYPE_SELECTED
+	OBJECTTYPE_MISSILE
 } ObjectType_t;
 
 // GameObject_t
@@ -169,11 +198,12 @@ typedef struct GameObject_s {
 	std::string		name;			// globally unique name (substring can be used for spriteSheet.frameAtlas)
 	int				guid;			// globally unique identifier amongst all entites (by number)
 	int				groupID;		// selected-group this belongs to
+	bool			selected;		// currently controlled monster
 
 	std::vector<GridCell_t *>		path;				// A* pathfinding results
 	std::vector<GridCell_t *>		cells;				// currently occupied gameGrid.cells indexes (between 1 and 4)
 	bool							onPath;				// if the entity is on the back tile of its path
-	SDL_Point						goal;				// user-defined path objective
+	SDL_Point *						goal;				// user-defined path objective
 
 	GameObject_s() 
 		:	origin({0, 0}),
@@ -194,11 +224,14 @@ typedef struct GameObject_s {
 			type(OBJECTTYPE_INVALID),
 			guid(-1),
 			onPath(false),
-			groupID (OBJECTTYPE_INVALID) {
+			groupID (-1),
+			selected(false) {
 	};
 
 	GameObject_s(const SDL_Point & origin,  const std::string & name, const int guid, ObjectType_t type) 
 		:	origin(origin),
+			bounds({ 0, 0, 0, 0 }),
+			center(vec2zero),
 			velocity(vec2zero),
 			name(name),
 			bob(0),
@@ -211,14 +244,14 @@ typedef struct GameObject_s {
 			type(type),
 			guid(guid),
 			onPath(false),
-			groupID(OBJECTTYPE_INVALID) {
+			groupID(-1),
+			selected(false) {
 		switch (type) {
 			case OBJECTTYPE_GOODMAN:
 				bounds = { origin.x + 4, origin.y + 4, 14, 16 };
 				health = 100;
 				stamina = 100;
 				speed = 4;
-				groupID = OBJECTTYPE_GOODMAN;
 				break; 
 			case OBJECTTYPE_MELEE:
 			case OBJECTTYPE_RANGED: 
@@ -228,7 +261,7 @@ typedef struct GameObject_s {
 				speed = 2;
 				break;
 			case OBJECTTYPE_MISSILE: 
-				bounds = { origin.x + 4, origin.y + 4, 8, 16 };
+				bounds = { origin.x, origin.y, 7, 20 };
 				health = 1;
 				stamina = -1;
 				speed = 3;
@@ -245,9 +278,60 @@ typedef struct GameObject_s {
 } GameObject_t;
 
 // entities
-std::unordered_map<std::string, int> entityAtlas;		// entity lookup by name
-std::vector<std::shared_ptr<GameObject_t>> entities;	// all dynamically allocated game objects
+std::vector<std::shared_ptr<GameObject_t>> entities;	// monsters and goodman
+std::vector<std::shared_ptr<GameObject_t>> missiles;	// kept separate to allow separate spawning and rendering protocols
 int entityGUID = 0;
+
+// AreaContents_t
+// dynamic pathfinding utility
+// DEBUG: convenience typdef for swept AABB collision tests
+typedef struct AreaContents_s {
+	std::vector<std::shared_ptr<GameObject_t>>	entities;
+	std::vector<SDL_Rect *>						obstacles;
+
+	// fills entities and obstacles with the contents of the 9 cells centered at centerPoint
+	void Update(const Vec2_t & centerPoint, const std::shared_ptr<GameObject_t> & ignore) {
+		static std::vector<int> idList;
+
+		int centerRow = (int)(centerPoint.x / cellSize);
+		int centerCol = (int)(centerPoint.y / cellSize);
+
+		for (int row = -1; row <= 1; row++) {
+			for (int col = -1; col <= 1; col++) {
+				int checkRow = centerRow + row;
+				int checkCol = centerCol + col;
+
+				if (checkRow >= 0 && checkRow < gridRows && checkCol >= 0 && checkCol < gridCols) {
+					auto & cell = gameGrid.cells[checkRow][checkCol];
+					if (!cell.solid) {
+
+						for (auto && entity : cell.contents) {
+							if (entity->guid == ignore->guid)
+								continue;
+
+							// DEBUG: don't add the same entity twice for those over multiple cells
+							auto & checkID = std::find(idList.begin(), idList.end(), entity->guid);
+							if (checkID == idList.end()) {
+								entities.push_back(entity);
+								idList.push_back(entity->guid);
+							}
+						}
+					}
+					else {
+						obstacles.push_back(&cell.bounds);
+					}
+				}
+			}
+		}
+		idList.clear();
+	}
+
+	// Clear
+	void Clear() {
+		entities.clear();
+		obstacles.clear();
+	};
+} AreaContents_t;
 
 // dynamic pathfinding
 typedef enum {
@@ -335,12 +419,8 @@ void DrawPath(std::shared_ptr<GameObject_t> & entity) {
 //***************
 void DrawEntities() {
 
-	// inefficient draw-order sort according to y-position
-	// makes a copy of all entity pointers to prevent invalidating the entityAtlas
-	// TODO: make missiles a separate vector thats unsorted and always drawn last
-	static std::vector<std::shared_ptr<GameObject_t>> drawEntities(entities);
-	std::sort(	drawEntities.begin(), 
-				drawEntities.end(), 
+	std::sort(	entities.begin(), 
+				entities.end(), 
 				[](auto && a, auto && b) { 
 					if (a->origin.y < b->origin.y)
 						return true;
@@ -352,9 +432,14 @@ void DrawEntities() {
 
 	// draw all highlights of selected group first
 	// TODO: and all other highlights
-	for (auto && entity : drawEntities) {
+	for (auto && entity : entities) {
 
-		if (entity->groupID == OBJECTTYPE_SELECTED) {
+		// draw occpuied cells
+		if (DebugCheck(DEBUG_DRAW_OCCUPANCY))
+			for (auto && cell : entity->cells)
+				DrawRect(cell->bounds, opaqueRed, true);
+
+		if (entity->selected) {
 			SDL_Rect & h_srcRect = spriteSheet.frames[spriteSheet.frameAtlas["highlight"]];
 			SDL_Rect h_dstRect = { entity->bounds.x - 4, entity->bounds.y - 4, h_srcRect.w + 8, h_srcRect.h + 8 };
 
@@ -373,7 +458,8 @@ void DrawEntities() {
 */
 	}
 
-	for (auto && entity : drawEntities) {
+	// draw all entities
+	for (auto && entity : entities) {
 
 		// get the drawing frames
 		int offset = entity->name.find_first_of('_');
@@ -419,6 +505,39 @@ void DrawEntities() {
 		if (DebugCheck(DEBUG_DRAW_PATH))
 			DrawPath(entity);
 	}
+
+
+	std::sort(	missiles.begin(), 
+				missiles.end(), 
+				[](auto && a, auto && b) { 
+					if (a->origin.y < b->origin.y)
+						return true;
+					else if (a->origin.y == b->origin.y && a->guid < b->guid)	// DEBUG: secondary sort by guid to prevent flicker
+						return true;
+					return false;
+				}	
+	);
+
+	for (auto && missile : missiles) {
+		// rotate the missile along its velocity vector
+		// FIXME/BUG: make the missile collision box a small circle/box at the tip
+		// UpdateOrigin will have to rotate the BBox around some part of the missile image center
+		// depending on the unit-velocity
+
+		SDL_Rect & srcRect = spriteSheet.frames[spriteSheet.frameAtlas["missile"]];
+		SDL_Rect dstRect = { missile->origin.x, missile->origin.y, srcRect.w, srcRect.h };
+		// angle in degrees
+		// FIXME: the sprite starts vertically oriented, so all rotations happend from there... so subtract 90 from the angle?
+		float angle = GetAngle(missile->velocity) + 90.0f;
+		SDL_RenderCopyEx(renderer, spriteSheet.texture, &srcRect, &dstRect, angle, NULL, SDL_FLIP_NONE);
+
+		// draw collision box
+		if (DebugCheck(DEBUG_DRAW_COLLISION))
+			DrawRect(missile->bounds, opaqueGreen, false);
+	}
+
+
+
 }
 
 //------------------------------------------END RENDERING FUNCTIONS----------------------------------------//
@@ -601,23 +720,119 @@ bool LoadSprites() {
 	return true;
 }
 
-// forward declaration of UpdateCellReferences
-void UpdateCellReferences(std::shared_ptr<GameObject_t> & entity);
+//***************
+// ClearCellReferences
+// collision utitliy
+//***************
+void ClearCellReferences(std::shared_ptr<GameObject_t> & entity) {
+	// remove the entity from any gameGrid.cells its currently in
+	for (auto && cell : entity->cells) {
+		auto & index = std::find(cell->contents.begin(), cell->contents.end(), entity);
+		if (index != cell->contents.end())
+			cell->contents.erase(index);
+	}
+
+	// empty the entity's cell references
+	entity->cells.clear();
+}
+
+//***************
+// UpdateCellReferences
+// collision utitliy
+//***************
+void UpdateCellReferences(std::shared_ptr<GameObject_t> & entity) {
+	ClearCellReferences(entity);
+
+	// check entity->bounds' four corners
+	// entity will wind up with 1 - 4 gameGrid cell references
+	// and those same gameGrid cells will have references to the entity
+	for (int corner = 0; corner < 4; corner++) {
+		SDL_Point testPoint;
+		switch (corner) {
+			case 0: testPoint = { entity->bounds.x , entity->bounds.y }; break;
+			case 1: testPoint = { entity->bounds.x + entity->bounds.w, entity->bounds.y }; break;
+			case 2: testPoint = { entity->bounds.x , entity->bounds.y + entity->bounds.h }; break;
+			case 3: testPoint = { entity->bounds.x + entity->bounds.w , entity->bounds.y + entity->bounds.h}; break;
+		}
+
+		// update the entity->cells
+		int testRow = testPoint.x / cellSize;
+		int testCol = testPoint.y / cellSize;
+		if (testRow < 0 || testRow >= gridRows || testCol < 0 || testCol >= gridCols)
+			continue;
+
+		GridCell_t * cell = &gameGrid.cells[testRow][testCol];
+		if (cell->solid)
+			continue;
+
+		if (std::find(entity->cells.begin(), entity->cells.end(), cell) == entity->cells.end()) 
+			entity->cells.push_back(cell);
+	}
+
+	// add the entity to any gameGrid cells its currently over
+	for (auto && cell : entity->cells) {
+		cell->contents.push_back(entity);
+	}
+}
+
+//***************
+// GetSpawnPoint
+//***************
+SDL_Point GetSpawnPoint(const ObjectType_t type) {
+	SDL_Point spawnPoint;
+	bool invalidSpawnPoint = false;
+	do {
+		spawnPoint.x = rand() % gameWidth;
+		spawnPoint.y = rand() % (gameHeight - cellSize);	// DEBUG: no grid row along bottom of the screen
+		invalidSpawnPoint = false;
+
+		// check the spawnPoint's resulting collision bounds' four corners,
+		// which will be over 1 - 4 gameGrid cells, doesn't overlap another entity, a solid cell, and is on the map
+		SDL_Rect collideBounds; 
+		switch (type) {
+			case OBJECTTYPE_GOODMAN: collideBounds = { spawnPoint.x + 4, spawnPoint.y + 4, 14, 16 }; break;
+			case OBJECTTYPE_MELEE:
+			case OBJECTTYPE_RANGED: collideBounds = { spawnPoint.x, spawnPoint.y + 4, 14, 16 }; break;
+			case OBJECTTYPE_MISSILE: collideBounds = { spawnPoint.x + 4, spawnPoint.y + 4, 8, 16 };  break;
+			default: collideBounds = { spawnPoint.x, spawnPoint.y + 4, 14, 16 }; break;
+		}
+
+		for (int corner = 0; corner < 4; corner++) {
+			SDL_Point testPoint;
+			switch (corner) {
+			case 0: testPoint = { collideBounds.x , collideBounds.y }; break;
+			case 1: testPoint = { collideBounds.x + collideBounds.w, collideBounds.y }; break;
+			case 2: testPoint = { collideBounds.x , collideBounds.y + collideBounds.h }; break;
+			case 3: testPoint = { collideBounds.x + collideBounds.w , collideBounds.y + collideBounds.h }; break;
+			}
+
+			int testRow = testPoint.x / cellSize;
+			int testCol = testPoint.y / cellSize;
+			if (testRow < 0 || testRow >= gridRows || testCol < 0 || testCol >= gridCols) {
+				invalidSpawnPoint = true;
+				break;
+			}
+
+			GridCell_t & cell = gameGrid.cells[testRow][testCol];
+			if (cell.solid || !cell.contents.empty()) {
+				invalidSpawnPoint = true;
+				break;
+			}
+		}
+	} while (invalidSpawnPoint);
+	return spawnPoint;
+}
 
 //***************
 // SpawnGoodman
 //***************
 void SpawnGoodman() {
-	int spawnX = 100;
-	int spawnY = 100;
-	int spawnRow = spawnX / cellSize;
-	int spawnCol = spawnY / cellSize;
-	// TODO: make this a random location in the grid (that isn't a collision tile)
+	SDL_Point spawnPoint = GetSpawnPoint(OBJECTTYPE_GOODMAN);
 	std::string name = "goodman";
-	std::shared_ptr<GameObject_t> goodman = std::make_shared<GameObject_t>(SDL_Point{ spawnX, spawnY }, name, entityGUID, OBJECTTYPE_GOODMAN);
+	std::shared_ptr<GameObject_t> goodman = std::make_shared<GameObject_t>(spawnPoint, name, entityGUID, OBJECTTYPE_GOODMAN);
 	entities.push_back(goodman);
-	entityAtlas[name] = entityGUID++;
 	UpdateCellReferences(goodman);
+	entityGUID++;
 }
 
 //***************
@@ -632,45 +847,6 @@ void SpawnMonsters() {
 	// spawn all the monsters in one go
 	for (int count = 0; count < 10; count++) {
 		
-		SDL_Point spawnPoint;
-		bool invalidSpawnPoint = false;
-		do {
-			spawnPoint.x = rand() % gameWidth;					
-			spawnPoint.y = rand() % (gameHeight - cellSize);	// DEBUG: no grid row along bottom of the screen
-			invalidSpawnPoint = false;
-
-			// check the spawnPoint's resulting collision bounds' four corners,
-			// which will be over 1 - 4 gameGrid cells, doesn't overlap another entity, a solid cell, and is on the map area
-			SDL_Rect collideBounds = { spawnPoint.x, spawnPoint.y + 4, 14, 16 };
-			for (int corner = 0; corner < 4; corner++) {
-				SDL_Point testPoint;
-				switch (corner) {
-					case 0: testPoint = { collideBounds.x , collideBounds.y }; break;
-					case 1: testPoint = { collideBounds.x + collideBounds.w, collideBounds.y }; break;
-					case 2: testPoint = { collideBounds.x , collideBounds.y + collideBounds.h }; break;
-					case 3: testPoint = { collideBounds.x + collideBounds.w , collideBounds.y + collideBounds.h}; break;
-				}
-
-				int testRow = testPoint.x / cellSize;
-				int testCol = testPoint.y / cellSize;
-				if (testRow < 0 || testRow >= gridRows || testCol < 0 || testCol >= gridCols) {
-					invalidSpawnPoint = true;
-					break;
-				}
-
-				GridCell_t * cell = &gameGrid.cells[testRow][testCol];
-				if (cell->solid) {
-					invalidSpawnPoint = true;
-					break;
-				}
-
-				if (!cell->contents.empty()) {
-					invalidSpawnPoint = true;
-					break;
-				}
-			}
-		} while (invalidSpawnPoint);
-
 		// give it a type and name
 		ObjectType_t type = (ObjectType_t)((rand() % 2) + 1);
 		std::string name;
@@ -680,11 +856,56 @@ void SpawnMonsters() {
 		}
 		name += std::to_string(entityGUID);
 
-		// add it to the entity vector, entityAtlas, and gameGrid
+		// get an valid spawnpoint
+		SDL_Point spawnPoint = GetSpawnPoint(type);
+
+		// add it to the entity vector and gameGrid
 		std::shared_ptr<GameObject_t> monster = std::make_shared<GameObject_t>(spawnPoint, name, entityGUID, type);
 		entities.push_back(monster);
-		entityAtlas[name] = entityGUID++;
 		UpdateCellReferences(monster);
+		entityGUID++;
+	}
+}
+
+//***************
+// SpawnMissile
+// TODO: give GameObject_t an owner variable, for most monsters/goodman its themselves, 
+// but for missiles its the attacker so goodman knows who attacked
+// TODO: perhaps for sophisticated monster grouping the owner could be the group leader
+//***************
+void SpawnMissile(const Vec2_t & origin, const Vec2_t & direction) {
+	SDL_Point spawnPoint = { (int)(origin.x), (int)(origin.y) };
+	// FIXME: situate the (image top-left) spawnPoint such that the given origin coincides with the...resulting bounds' center
+	// missile bounds (currently) { origin.x + 4, origin.y + 4, 8, 16 };
+	// missile image dimensions: 7w x 20h 
+
+	std::string name = "missile_" + std::to_string(entityGUID);
+	std::shared_ptr<GameObject_t> missile = std::make_shared<GameObject_t>(spawnPoint, name, entityGUID, OBJECTTYPE_MISSILE);
+	missiles.push_back(missile);
+	UpdateCellReferences(missile);
+	missile->velocity = direction;
+	entityGUID++;
+}
+
+//***************
+// RemoveEntity
+//***************
+void RemoveEntity(std::shared_ptr<GameObject_t> & entity) {
+	ClearCellReferences(entity);
+
+	// DEBUG: test removal from groupSelection vector first to be sure even if it wasn't selected
+	// that the memory block is still in use to be tested (instead of getting a read-access error)
+	if (entity->selected) {
+		auto & index = std::find(groupSelection.begin(), groupSelection.end(), entity);
+		groupSelection.erase(index);
+	}
+	
+	if (entity->type == OBJECTTYPE_MISSILE) {
+		auto & index = std::find(missiles.begin(), missiles.end(), entity);
+		missiles.erase(index);
+	} else {
+		auto & index = std::find(entities.begin(), entities.end(), entity);
+		entities.erase(index);
 	}
 }
 
@@ -822,6 +1043,39 @@ void ClearSets(std::vector<GridCell_t *> & openSet, std::vector<GridCell_t*> & c
 }
 
 //***************
+// PointToCell
+// converts 2D point to valid grid cell indexes
+//***************
+void PointToCell(const SDL_Point & point, int & row, int & col) {
+	row = point.x / cellSize;
+	col = point.y / cellSize;
+
+	// snap off-map row
+	if (row < 0)
+		row = 0;
+	else if (row >= gridRows)
+		row = gridRows - 1;
+
+	// snap off-map row
+	if (col < 0)
+		col = 0;
+	else if (col >= gridCols)
+		col = gridCols - 1;
+}
+
+//***************
+// PointToCell
+// returns a validated grid cell 
+// under the given point
+//***************
+GridCell_t & PointToCell(const SDL_Point & point) {
+	int row, col;
+	PointToCell(point, row, col);
+	return gameGrid.cells[row][col];
+}
+
+
+//***************
 // PathFind
 // A* search of gameGrid cells
 // only searches static non-solid geometry
@@ -835,30 +1089,12 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 	static std::vector<GridCell_t *> openSet;
 	static std::vector<GridCell_t *> closedSet;
 
-	int startRow = start.x / cellSize;
-	int startCol = start.y / cellSize;
-	int endRow = goal.x / cellSize;
-	int endCol = goal.y / cellSize;
-
-	// snap off-map start row/col
-	if (startRow < 0)
-		startRow = 0;
-	else if (startRow >= gridRows)
-		startRow = gridRows - 1;
-	if (startCol < 0)
-		startCol = 0;
-	else if (startCol >= gridCols)
-		startCol = gridCols - 1;
-
-	// snap off-map end row/col
-	if (endRow < 0)
-		endRow = 0;
-	else if (endRow >= gridRows)
-		endRow = gridRows - 1;
-	if (endCol < 0)
-		endCol = 0;
-	else if (endCol >= gridCols)
-		endCol = gridCols - 1;
+	int startRow;
+	int startCol;
+	int endRow;
+	int endCol;
+	PointToCell(start, startRow, startCol);
+	PointToCell(goal, endRow, endCol);
 
 	GridCell_t * startCell = &gameGrid.cells[startRow][startCol];
 	GridCell_t * endCell = &gameGrid.cells[endRow][endCol];
@@ -1023,91 +1259,6 @@ void UpdateOrigin(std::shared_ptr<GameObject_t>  & entity, const Vec2_t & move) 
 	entity->center.y += nearbyintf(move.y);
 }
 
-//***************
-// UpdateCellReferences
-// collision utitliy
-//***************
-void UpdateCellReferences(std::shared_ptr<GameObject_t> & entity) {
-	// remove the entity from any gameGrid.cells its currently in
-	for (auto && cell : entity->cells) {
-		auto & index = std::find(cell->contents.begin(), cell->contents.end(), entity);
-		if (index != cell->contents.end())
-			cell->contents.erase(index);
-	}
-
-	// empty the entity's cell references
-	entity->cells.clear();
-
-	// check entity->bounds' four corners
-	// entity will wind up with 1 - 4 gameGrid cell references
-	// and those same gameGrid cells will have references to the entity
-	for (int corner = 0; corner < 4; corner++) {
-		SDL_Point testPoint;
-		switch (corner) {
-			case 0: testPoint = { entity->bounds.x , entity->bounds.y }; break;
-			case 1: testPoint = { entity->bounds.x + entity->bounds.w, entity->bounds.y }; break;
-			case 2: testPoint = { entity->bounds.x , entity->bounds.y + entity->bounds.h }; break;
-			case 3: testPoint = { entity->bounds.x + entity->bounds.w , entity->bounds.y + entity->bounds.h}; break;
-		}
-
-		// update the entity->cells
-		int testRow = testPoint.x / cellSize;
-		int testCol = testPoint.y / cellSize;
-		if (testRow < 0 || testRow >= gridRows || testCol < 0 || testCol >= gridCols)
-			continue;
-
-		GridCell_t * cell = &gameGrid.cells[testRow][testCol];
-		if (cell->solid)
-			continue;
-
-		if (std::find(entity->cells.begin(), entity->cells.end(), cell) == entity->cells.end()) 
-			entity->cells.push_back(cell);
-	}
-
-	// add the entity to any gameGrid cells its currently over
-	for (auto && cell : entity->cells) {
-		cell->contents.push_back(entity);
-	}
-}
-
-//***************
-// GetAreaContents
-// dynamic pathfinding utility
-// queries area dynamic contents
-//***************
-void GetAreaContents(const int centerRow, const int centerCol, std::vector<std::shared_ptr<GameObject_t>> & areaEntities, std::vector<SDL_Rect *> & areaObstacles, std::shared_ptr<GameObject_t> & ignore) {
-
-	static std::vector<int> idList;
-
-	for (int row = -1; row <= 1; row++) {
-		for(int col = -1; col <= 1; col++) {
-			int checkRow = centerRow + row;
-			int checkCol = centerCol + col;
-			if (checkRow >= 0 && checkRow < gridRows && checkCol >= 0 && checkCol < gridCols) {
-				auto & target = gameGrid.cells[checkRow][checkCol];
-				if (!target.solid) {
-
-					for (auto && entity : target.contents) {
-						if (entity->guid == ignore->guid)
-							continue;
-
-						// DEBUG: don't add the same entity twice for those over multiple cells
-						auto & checkID = std::find(idList.begin(), idList.end(), entity->guid);
-						if (checkID == idList.end()) {
-							areaEntities.push_back(entity);
-							idList.push_back(entity->guid);
-						}
-					}
-				} else {
-					areaObstacles.push_back(&target.bounds);
-				}
-			}
-		}
-	}
-
-	idList.clear();
-}
-
 ///////////////////////////////////////////////////////////////////////////////////////////////
 // BEGIN FREEHILL flocking test
 
@@ -1211,6 +1362,17 @@ SDL_Rect TranslateRect(const SDL_Rect & target, const Vec2_t & v) {
 						target.h	};
 }
 
+//***************
+// TranslateSelf
+// dynamic pathfinding utility
+//***************
+void TranslateSelf(SDL_Rect & target, const Vec2_t & v) {
+	target = {	(int)nearbyintf(target.x + v.x),
+				(int)nearbyintf(target.y + v.y),
+				target.w,
+				target.h };
+}
+
 //******************
 // Rotate
 // expanded and factored version of:
@@ -1220,10 +1382,8 @@ SDL_Rect TranslateRect(const SDL_Rect & target, const Vec2_t & v) {
 // --only deals with unit length quaternions--
 //******************
 void Rotate(bool clockwise, Vec2_t & result) {
-#define DEG2RAD(angle) ( angle * ((float)(M_PI)/180.0f) )
 	static const float ccw[]	= { 0.0f, 0.0f, SDL_sinf(DEG2RAD(1.0f) / 2.0f), SDL_cosf(DEG2RAD(1.0f) / 2.0f) };
 	static const float cw[]		= { 0.0f, 0.0f, SDL_sinf(DEG2RAD(-1.0f) / 2.0f), SDL_cosf(DEG2RAD(-1.0f) / 2.0f) };
-#undef DEG2RAD
 
 	const float * r;
 	if (clockwise)
@@ -1245,15 +1405,120 @@ void Rotate(bool clockwise, Vec2_t & result) {
 }
 
 //***************
-// CheckOverlap
+// Maximize
+//***************
+float Maximize(const float & a, const float & b) {
+	return a > b ? a : b;
+}
+
+//***************
+// Minimize
+//***************
+float Minimize(const float & a, const float & b) {
+	return a < b ? a : b;
+}
+
+//***************
+// BroadPhaseAABB
+// dynamic pathfinding utility
+// Broad-phase moving AABB-AABB collision test utility
+//***************
+SDL_Rect GetBroadPhaseAABB(std::shared_ptr<GameObject_t> & entity) {
+	SDL_Rect bpAABB;
+	Vec2_t sweep = entity->velocity * entity->speed;
+	bpAABB.x = entity->velocity.x > 0.0f ? entity->bounds.x : (int)nearbyintf(entity->bounds.x + sweep.x);
+	bpAABB.y = entity->velocity.y > 0.0f ? entity->bounds.y : (int)nearbyintf(entity->bounds.y + sweep.y);
+	bpAABB.w = entity->velocity.x > 0.0f ? (int)nearbyintf(entity->bounds.w + sweep.x) : (int)nearbyintf(entity->bounds.w - sweep.x);
+	bpAABB.h = entity->velocity.y > 0.0f ? (int)nearbyintf(entity->bounds.h + sweep.y) : (int)nearbyintf(entity->bounds.h - sweep.y);
+	return bpAABB;
+}
+
+//***************
+// AABBAABBTest
 // dynamic pathfinding utility
 // AABB-AABB collision test
+// DEBUG: includes touching
+// returns true in the case of intersection
 //***************
-bool CheckOverlap(const SDL_Rect & a, const SDL_Rect & b) {
+bool AABBAABBTest(const SDL_Rect & a, const SDL_Rect & b) {
 	int t;
+	// if((t = a.x - b.x) == b.w || -t == a.w) return true; (confirms touching in x)
+	// if((t = a.y - b.y) == b.h || -t == a.h) return true; (confirms touching in y)
+
 	if ((t = a.x - b.x) > b.w || -t > a.w) return false;
 	if ((t = a.y - b.y) > b.h || -t > a.h) return false;
 	return true;
+}
+
+//***************
+// MovingAABBAABBTest
+// dynamic pathfinding utility
+// AABB-AABB collision test where both are moving
+// returns 0 if already in collision
+// returns 1 if no collision will occur
+// otherwise returns the fraction along the movement
+// where collision first occurs
+//***************
+float MovingAABBAABBTest(const SDL_Rect & a, const SDL_Rect & b, const Vec2_t & va, const Vec2_t & vb, Vec2_t & collisionNormal) {
+
+	// started in collision
+	// FIXME/BUG: this quick-out ignores relative velocity
+	// in determining the proper collision normal
+//	if (AABBAABBTest(a, b)) {
+//		collisionNormal = vec2zero;		// FIXME: this should be based on relative velocity and displacement
+//		return 0.0f;
+//	}
+
+	// FIXME/BUG: the collision normal is not computed if the entity walked exactly up to the obstacle as to touch it this frame
+	// then NEXT frame its right on it, so NONE of the if conditions execute
+
+	Vec2_t aMin = { (float)a.x, (float)a.y };
+	Vec2_t aMax = { (float)(a.x + a.w), (float)(a.y + a.h) };
+	Vec2_t bMin = { (float)b.x, (float)b.y };
+	Vec2_t bMax = { (float)(b.x + b.w), (float)(b.y + b.h) };
+	Vec2_t relativeV = va - vb;
+	float tFirst = 0.0f;
+	float tLast = 1.0f;
+	collisionNormal = vec2zero;
+
+	// determine times of first and last contact, if any
+	for (int i = 0; i < 2; i++) {
+		if (relativeV[i] < 0.0f) {
+			if (aMax[i] <= bMin[i]) {	// non-intersecting and moving apart
+				collisionNormal = vec2zero;
+				return 1.0f;
+			}
+			if (bMax[i] <= aMin[i]) { 
+				tFirst = Maximize((bMax[i] - aMin[i]) / relativeV[i], tFirst);
+				collisionNormal[i] = 1.0f;
+			}
+			if (aMax[i] >= bMin[i]) {
+				tLast = Minimize((bMin[i] - aMax[i]) / relativeV[i], tLast);
+			}
+		}
+		if (relativeV[i] > 0.0f) {
+			if (aMin[i] >= bMax[i]) {	// non-intersecting and moving apart
+				collisionNormal = vec2zero;
+				return 1.0f;
+			}
+			if (aMax[i] <= bMin[i]) {
+				tFirst = Maximize((bMin[i] - aMax[i]) / relativeV[i], tFirst);
+				collisionNormal[i] = -1.0f;
+			}
+			if (bMax[i] >= aMin[i]) {
+				tLast = Minimize((bMax[i] - aMin[i]) / relativeV[i], tLast);
+			}
+		}
+	}
+	
+	// too far away to make contact
+	// FIXME/BUG: possibly move this out of the for loop
+	if (tFirst > tLast) {
+		collisionNormal = vec2zero;
+		return 1.0f;
+	}
+
+	return tFirst;
 }
 
 //***************
@@ -1262,59 +1527,123 @@ bool CheckOverlap(const SDL_Rect & a, const SDL_Rect & b) {
 // DEBUG: never call this function with an empty path
 //***************
 void CheckPathCell(std::shared_ptr<GameObject_t> & entity) {
-	if (entity->onPath && !CheckOverlap(entity->bounds, entity->path.back()->bounds)) {	
+	if (entity->onPath && !AABBAABBTest(entity->bounds, entity->path.back()->bounds)) {	
 		entity->onPath = false;
 		entity->path.pop_back();										
 	}
 
-	if (!entity->path.empty() && CheckOverlap(entity->bounds, entity->path.back()->bounds)) {
+	if (!entity->path.empty() && AABBAABBTest(entity->bounds, entity->path.back()->bounds)) {
 		entity->onPath = true;
 	}
 }
 
-//***************
-// RegulateSpeed
-// dynamic pathfinding utility
-// tests self against local entities for collision
-// and set maximum speed along the current unit-velocity
-//***************
-float RegulateSpeed(std::vector<std::shared_ptr<GameObject_t>> & areaEntities, std::vector<SDL_Rect *> & areaObstacles, std::shared_ptr<GameObject_t> & self) {
-	for (float speed = self->speed; speed > 0; speed--) {
-		Vec2_t move = self->velocity * speed;
-		SDL_Rect testBounds = TranslateRect(self->bounds, move);
 
-		bool collision = false;
-		// entity check
-		for (auto && entity : areaEntities) {
-			if (CheckOverlap(testBounds, entity->bounds)) {
-				collision = true;
-				break;
+//***************
+// CheckForwardCollision
+// returns the fraction along the current velocity where
+// touching first occurs between self and 
+// local entities or static obstacles, if any
+// DEBUG: never returns 0.0f which implies two things started in overlap/touching
+// sets the collision entity, if any
+// otherwise sets the collision entity to nullptr
+//***************
+float CheckForwardCollision(std::shared_ptr<GameObject_t> & self, const AreaContents_t & contents, std::shared_ptr<GameObject_t> & collisionEntity) {
+
+	float nearest = 1.0f;
+	const Vec2_t selfMove = self->velocity * self->speed;
+	SDL_Rect broadPhaseBounds = GetBroadPhaseAABB(self);
+
+	// entity check
+	collisionEntity.reset();
+	for (auto && entity : contents.entities) {
+
+		// broad-phase test first
+		if (AABBAABBTest(broadPhaseBounds, entity->bounds)) {
+			Vec2_t normal;
+			float fraction = MovingAABBAABBTest(self->bounds, entity->bounds, selfMove, entity->velocity * entity->speed, normal);
+
+			// only consider approaching collisions
+			if (fraction < nearest && (self->velocity * normal) < 0.0f) {
+				nearest = fraction;
+				collisionEntity = entity;
 			}
 		}
-		if (collision)
-			continue;
-
-		// static obstacle check
-		for (auto && obstacle : areaObstacles) {
-			if (CheckOverlap(testBounds, *obstacle)) {
-				collision = true;
-				break;
-			}
-		}
-		if (!collision)
-			return speed;
 	}
 
-	return 0;
+	// static obstacle check
+	for (auto && obstacle : contents.obstacles) {
+
+		// broad-phase test first
+		if (AABBAABBTest(broadPhaseBounds, *obstacle)) {
+			Vec2_t normal;
+			float fraction = MovingAABBAABBTest(self->bounds, *obstacle, selfMove, { 0.0f, 0.0f }, normal);
+
+			// only consider approaching collisions
+			if (fraction < nearest && (self->velocity * normal) < 0.0f) {
+				nearest = fraction;
+				collisionEntity.reset();
+			}
+		}
+	}
+	return nearest;
 }
 
 //***************
-// Move
+// AvoidCollision
+// dynamic pathfinding utility
+// updates current velocity to avoid predicted collisions
+// with all area contents (dynamic and static obstacles)
+// returns the maximum fraction along any forward velocity
+// before that avoids all collision
+//***************
+float AvoidCollision(std::shared_ptr<GameObject_t> & self, const AreaContents_t & contents) {
+	static std::shared_ptr<GameObject_t> collisionEntity;
+
+	Vec2_t desiredVelocity = self->velocity;
+
+	// FIXME/BUG: CheckForwardCollision works fine, but AvoidCollision messes with the fraction (ie from 0.5f to 1.0f)
+	// as it should, but then the velocity doesn't re-orient to that bestFraction direction
+
+	// rotated 90 degrees CW to setup for the 180 degree CCW sweep
+	self->velocity = { -self->velocity.y, self->velocity.x };
+
+	float bestWeight = 0.0f;
+	float bestFraction = 0.0f;
+	Vec2_t bestVelocity = vec2zero;
+
+	// check a 180 degree forward arc maximizing movement along path
+	for (int angle = 0; angle < 180; angle++) {
+		Rotate(CLOCKWISE, self->velocity);
+		float fraction = CheckForwardCollision(self, contents, collisionEntity);
+		float weight = (self->velocity * desiredVelocity);
+
+		if (fraction > bestFraction || (fraction == bestFraction && weight > bestWeight)) {
+			bestWeight = weight;
+			bestFraction = fraction;
+			bestVelocity = self->velocity;
+		}
+	}
+	self->velocity = bestVelocity;
+	return bestFraction;
+}
+
+//***************
+// Collide
+// collision response called by the sender
+// TODO: possibly invoke this during Move
+//***************
+void Collide(std::shared_ptr<GameObject_t> & sender, std::shared_ptr<GameObject_t> & receiver) {
+	//	entities[1]->blinkTime = SDL_GetTicks() + 1000;
+	//	entities[1]->damaged = true;
+	//	entities[1]->health = -10;
+}
+
+//***************
+// Walk
 // dynamic pathfinding
 //***************
-void Move(std::shared_ptr<GameObject_t> & entity) {
-	static std::vector<std::shared_ptr<GameObject_t>> areaEntities;
-	static std::vector<SDL_Rect *> areaObstacles;
+void Walk(std::shared_ptr<GameObject_t> & entity) {
+	static AreaContents_t areaContents;						// fetched and used once per frame per entity, then cleared
 
 	Uint32 dt = SDL_GetTicks() - entity->moveTime;
 
@@ -1346,23 +1675,9 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 // END FREEHILL path cell traversal and update test
 
 		// determine optimal unit-velocity and speed 
-		GetAreaContents((int)(entity->center.x / cellSize), (int)(entity->center.y / cellSize), areaEntities, areaObstacles, entity);
 		Vec2_t move = vec2zero;
 
-		// if a nearby entity in the same group is closer to the goal and has stopped
-		// then stop moving, otherwise execute a velocity update
-		bool groupStopped = false;
-		for (auto && other : areaEntities) {
-			if (other->groupID == entity->groupID &&
-				SDL_abs((int)nearbyintf(entity->goal.x - other->center.x)) < SDL_abs((int)nearbyintf(entity->goal.x - entity->center.x)) &&
-				SDL_abs((int)nearbyintf(entity->goal.y - other->center.y)) < SDL_abs((int)nearbyintf(entity->goal.y - entity->center.y)) &&
-				other->velocity == vec2zero) {
-				groupStopped = true;
-				break;
-			}
-		}
-
-		if (!groupStopped && !entity->path.empty()) {
+		if (!entity->path.empty()) {
 
 			// head towards last waypoint if off-path,
 			// otherwise use the local gradient
@@ -1376,12 +1691,12 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 			} else {
 				auto & currentWaypoint = entity->path.back()->center;
 				if (!CheckWaypointRange(entity)) {
-					Vec2_t waypointVec = { (float)(currentWaypoint.x - entity->center.x),
-											(float)(currentWaypoint.y - entity->center.y) };
+					Vec2_t waypointVec = {	(float)(currentWaypoint.x - entity->center.x),
+											(float)(currentWaypoint.y - entity->center.y)	};
 					Normalize(waypointVec);
 					entity->velocity = waypointVec;
 				} else {
-					entity->path.clear();
+					entity->path.pop_back();
 					entity->velocity = vec2zero;
 				}
 			}
@@ -1399,41 +1714,32 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 			Normalize(entity->velocity);
 */
 // END FREEHILL flocking test
-		
-			// FIXME: this whole sub-routine is a bottleneck to be optimized
-			float speed;
-			if (entity->velocity != vec2zero && (speed = RegulateSpeed(areaEntities, areaObstacles, entity)) == 0){
-				Vec2_t oldVelocity = entity->velocity;
-			
-				float bestWeight = 0.0f;
-				float bestSpeed = 0.0f;
-				Vec2_t bestVelocity = vec2zero;
-				bool direction;
-				
-				// check a 180 degree forward arc maximizing movement along path
-				for (int flip = 0; flip < 2; flip++) {
-					if (flip == 0)
-						direction = COUNTER_CLOCKWISE;
-					else
-						direction = CLOCKWISE;
 
-					for (int angle = 0; angle < 90; angle++) {
-						Rotate(direction, entity->velocity);
-						speed = RegulateSpeed(areaEntities, areaObstacles, entity);
-
-						float weight = (entity->velocity * oldVelocity);
-						if (speed > bestSpeed && weight >= bestWeight) {
-							bestWeight = weight;
-							bestSpeed = speed;
-							bestVelocity = entity->velocity;
-						}
+			// stop moving if the path is crowded
+			areaContents.Update(entity->center, entity);
+			std::shared_ptr<GameObject_t> collisionEntity;
+			float fraction = CheckForwardCollision(entity, areaContents, collisionEntity);
+			if (fraction < 1.0f && collisionEntity) {
+				if (collisionEntity->velocity == vec2zero) {
+					// FIXME: occasional perma-bob vibrator due to clear path but obstructed velocity
+					// (collision check doesn't quite fix this)
+					bool pathCrowded = std::find_if(	entity->path.begin(), 
+														entity->path.end(),
+														[&entity](auto && cell) { 
+															return EMPTY_EXCEPT_SELF((*cell), entity);	// cell->contents.empty();
+													}) == entity->path.end();
+					if (pathCrowded) { 
+						entity->velocity = vec2zero;
 					}
-					entity->velocity = oldVelocity;
 				}
-				entity->velocity = bestVelocity;
-				speed = bestSpeed;
 			}
-			move = entity->velocity * speed;
+
+			// pick a different trajectory if there's no way forward
+			// FIXME/BUG: because fraction reported is always > 0.0f the entity will always move
+			// which is probably why the entity walks straight into others (totally overlapping)
+			if (entity->velocity != vec2zero)
+				fraction = AvoidCollision(entity, areaContents);
+			move = entity->velocity * entity->speed * fraction;// *((float)frameTime / 1000.0f);
 			UpdateOrigin(entity, move);
 		}
 
@@ -1443,19 +1749,23 @@ void Move(std::shared_ptr<GameObject_t> & entity) {
 
 		UpdateBob(entity, move);		// DEBUG: bob does not affect cell location
 	}
-	areaEntities.clear();
-	areaObstacles.clear();
+	areaContents.Clear();
 }
 
 //***************
-// Collide
-// collision response called by the sender
-// TODO: possibly invoke this during Move
+// Fly
+// linear movement
 //***************
-void Collide(std::shared_ptr<GameObject_t> & sender, std::shared_ptr<GameObject_t> & receiver) {
-	//	entities[1]->blinkTime = SDL_GetTicks() + 1000;
-	//	entities[1]->damaged = true;
-	//	entities[1]->health = -10;
+void Fly(std::shared_ptr<GameObject_t> & entity) {
+	Uint32 dt = SDL_GetTicks() - entity->moveTime;
+
+	if (dt >= 25) {
+		entity->moveTime = SDL_GetTicks();
+		Vec2_t move = entity->velocity * entity->speed;
+		UpdateOrigin(entity, move);
+		UpdateCellReferences(entity);
+		UpdateBob(entity, move);		// DEBUG: bob does not affect cell location
+	}
 }
 
 //***************
@@ -1463,7 +1773,7 @@ void Collide(std::shared_ptr<GameObject_t> & sender, std::shared_ptr<GameObject_
 //***************
 void GoodmanThink(std::shared_ptr<GameObject_t> & entity) {
 	// TODO: Goodman's strategy/state here
-	Move(entity);
+	Walk(entity);
 }
 
 //***************
@@ -1472,7 +1782,7 @@ void GoodmanThink(std::shared_ptr<GameObject_t> & entity) {
 //***************
 void MeleeThink(std::shared_ptr<GameObject_t> & entity) {
 	// TODO: resolve standing orders
-	Move(entity);
+	Walk(entity);
 }
 
 //***************
@@ -1480,15 +1790,19 @@ void MeleeThink(std::shared_ptr<GameObject_t> & entity) {
 //***************
 void RangedThink(std::shared_ptr<GameObject_t> & entity) {
 	// TODO: resolve standing orders
-	Move(entity);
+	Walk(entity);
 }
 
 //***************
 // MissileThink
 //***************
 void MissileThink(std::shared_ptr<GameObject_t> & entity) {
-	// TODO: resolve linear trajectory, not pathfinding
-	Move(entity);
+	Fly(entity);
+//	if (CheckLocalCollision(entity, nullptr)) {
+		// TODO: only do damage to goodman
+		// TODO: explode no matter  (begin explosion animation and sound)
+	//	RemoveEntity(entity);
+//	}
 }
 
 //***************
@@ -1501,9 +1815,11 @@ void Think() {
 			case OBJECTTYPE_GOODMAN: GoodmanThink(entity);  break;
 			case OBJECTTYPE_MELEE: MeleeThink(entity);  break;
 			case OBJECTTYPE_RANGED: RangedThink(entity);  break;
-			case OBJECTTYPE_MISSILE: MissileThink(entity);  break;
 		}
 	}
+
+	for (auto && missile : missiles)
+		MissileThink(missile);
 }
 
 //***************
@@ -1514,20 +1830,12 @@ void SelectGroup(SDL_Point & first, SDL_Point & second) {
 
 	static std::vector<int> idList;
 
-	int firstRow	= first.x / cellSize;
-	int firstCol	= first.y / cellSize;
-	int secondRow	= second.x / cellSize;
-	int secondCol	= second.y / cellSize;
-
-	// bounds checking
-	if (firstRow < 0)				firstRow = 0;
-	else if (firstRow >= gridRows)	firstRow = gridRows - 1;
-	if (secondRow < 0)				secondRow = 0;
-	else if (secondRow >= gridRows)	secondRow = gridRows - 1;
-	if (firstCol < 0)				firstCol = 0;
-	else if (firstCol >= gridCols)	firstCol = gridCols - 1;
-	if (secondCol < 0)				secondCol = 0;
-	else if (secondCol >= gridCols)	secondCol = gridCols - 1;
+	int firstRow;
+	int firstCol;
+	int secondRow;
+	int secondCol;
+	PointToCell(first, firstRow, firstCol);
+	PointToCell(second, secondRow, secondCol);
 
 	// get top-left and bottom-right indexes
 	int startRow	= (firstRow < secondRow) ? firstRow : secondRow;
@@ -1550,7 +1858,8 @@ void SelectGroup(SDL_Point & first, SDL_Point & second) {
 					// DEBUG: don't add the same entity twice for those over multiple cells
 					auto & checkID = std::find(idList.begin(), idList.end(), entity->guid);
 					if (checkID == idList.end()) {
-						entity->groupID = OBJECTTYPE_SELECTED;
+						entity->selected = true;
+						entity->groupID = 4;		// TODO: random group number for now, but use available/forced group number tracking
 						groupSelection.push_back(entity);
 						idList.push_back(entity->guid);
 					}
@@ -1565,8 +1874,10 @@ void SelectGroup(SDL_Point & first, SDL_Point & second) {
 // ClearGroupSelection
 //***************
 void ClearGroupSelection() {
-	for (auto && entity : groupSelection)
-		entity->groupID = OBJECTTYPE_INVALID;
+	for (auto && entity : groupSelection) {
+		entity->groupID = -1;
+		entity->selected = false;
+	}
 	groupSelection.clear();
 }
 
@@ -1589,13 +1900,17 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 	// area select test
 	SDL_Point first, second;
 	bool beginSelection = false;
-
-	// begin game loop
 	int mouseX = -1;
 	int mouseY = -1;
+
+	// begin game loop
 	bool running = true;
 	SDL_Event event;
 	while (running) {
+
+		// cpu-independent interval (eg: for smooth movement)
+		Uint32 startTime = SDL_GetTicks();
+
 		while (SDL_PollEvent(&event)) {
 			switch (event.type) {
 				case SDL_QUIT: {
@@ -1614,8 +1929,8 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 					break;
 				}
 				case SDL_MOUSEBUTTONDOWN: {
+					first = { event.button.x, event.button.y };
 					if (groupSelection.empty()) {
-						first = { event.button.x, event.button.y };
 						beginSelection = true;
 					} 
 					break;
@@ -1625,11 +1940,39 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 						beginSelection = false;
 						SelectGroup(first, second);
 					} else if (!groupSelection.empty()) {
-						// group A* pathfinding
-						// DEBUG: only control one group at a time
-						for (auto && entity : groupSelection) {
-							entity->goal = second;
-							PathFind(entity, SDL_Point{ (int)entity->center.x, (int)entity->center.y }, second);
+
+						// check for an attack on goodman
+						auto & cell = PointToCell(second);
+						auto & findGoodman = std::find_if(	cell.contents.begin(),
+															cell.contents.end(),
+															[](auto && entity) {
+															return entity->type == OBJECTTYPE_GOODMAN;
+														});
+						if (findGoodman != cell.contents.end()) {
+							// launch a missle attack from all ranged monsters in the group
+							for (auto && entity : groupSelection) {
+								if (entity->type == OBJECTTYPE_RANGED) {
+									Vec2_t launchDir = (*findGoodman)->center - entity->center;
+									Normalize(launchDir);
+									SpawnMissile(entity->center, launchDir);
+								}
+							}
+
+							// TODO: set all group's monster's goal to goodman's center and continually pathfind to him each frame
+							// TODO: have MELEE types chase and hit him (then back away quickly?)
+						}
+						
+						// TODO: alternatively if shift is held for down and up click, launch a
+						// stationary attack towards the current mouse location (second point)
+
+						else {
+							// group A* pathfinding
+							// DEBUG: only control one group at a time
+							// TODO: quickly label/re-label and toggle between groups
+							for (auto && entity : groupSelection) {
+								entity->goal = &cell.center;
+								PathFind(entity, SDL_Point{ (int)entity->center.x, (int)entity->center.y }, second);
+							}
 						}
 					}
 					break;
@@ -1676,6 +2019,17 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 
 		SDL_RenderPresent(renderer);
 		// end drawing
+
+		// frame-rate governing delay
+		Uint32 deltaTime = SDL_GetTicks() - startTime;
+
+		// DEBUG: breakpoint handling
+		if (deltaTime > 1000)
+			deltaTime = frameTime;
+
+		// DEBUG: delta time of this last frame is not used as the global update interval,
+		// instead the globally available update interval is fixed to frameTime
+		deltaTime <= frameTime ? SDL_Delay(frameTime - deltaTime) : SDL_Delay(deltaTime - frameTime);
 	}
 	// end game loop
 

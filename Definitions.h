@@ -18,5 +18,7 @@
 #include <queue>
 
 #define BIT(x) 1 << x
+#define DEG2RAD(angle) ( angle * ((float)(M_PI)/180.0f) )
+#define RAD2DEG(radians) ( radians * (180.0f/((float)M_PI)) )
 
 #endif /* DBAH_DEFINITIONS_H */
