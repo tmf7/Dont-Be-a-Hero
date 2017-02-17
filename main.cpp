@@ -31,7 +31,7 @@ typedef enum {
 	DEBUG_DRAW_OCCUPANCY	= BIT(2)
 } DebugFlags_t;
 
-Uint16 debugState = DEBUG_DRAW_PATH | DEBUG_DRAW_COLLISION;	// DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH | DEBUG_DRAW_OCCUPANCY;
+Uint16 debugState =  DEBUG_DRAW_PATH | DEBUG_DRAW_COLLISION;	// DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH | DEBUG_DRAW_OCCUPANCY;
 
 //***************
 // DebugCheck
@@ -535,9 +535,6 @@ void DrawEntities() {
 		if (DebugCheck(DEBUG_DRAW_COLLISION))
 			DrawRect(missile->bounds, opaqueGreen, false);
 	}
-
-
-
 }
 
 //------------------------------------------END RENDERING FUNCTIONS----------------------------------------//
@@ -988,20 +985,6 @@ bool InitGame(std::string & message) {
 //-------------------------------------BEGIN PER-FRAME FUNCTIONS-----------------------------------------//
 
 //***************
-// RemoveObject
-// returns true on success, 
-// false otherwise
-//***************
-bool RemoveObject(const std::vector<std::shared_ptr<GameObject_t>> & vector, const std::shared_ptr<GameObject_t> & target) {
-	for (auto && object : vector) {
-		if (object == target) {
-			return true;
-		}
-	}
-	return false;
-}
-
-//***************
 // GetDistance
 // A* pathfinding utility
 //***************
@@ -1186,23 +1169,6 @@ bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Poi
 	return false;		// DEBUG: this will be hit if an entity is surrounded by entities on its first search
 }
 
-/*
-//***************
-// UpdateCollision
-//***************
-void UpdateCollision() {
-	// one at at time, such that the first entity's final position is resolved before the second entity moves
-	// to check for collision, then adjust its final position.
-	SDL_HasIntersection(NULL, NULL);						// if this does occur, then clip a line segment that travels
-	// from 
-	SDL_IntersectRectAndLine(NULL, NULL, NULL, NULL, NULL); // segment gets clipped in EITHER direction
-	// traverse all entities and add them to each grid cell their bounds is over (likely just one)
-	// similarly, add each cell under the entity bounds to the entity's list
-	// ultimately, each frame, traverse each entity that has MOVED (no bobbing in place) and check
-	// all the lists of cells it belongs to for any collision boxes (wall, goodman, monster, missile)
-}
-*/
-
 //***************
 // UpdateBob
 // used for animation
@@ -1257,6 +1223,7 @@ void UpdateOrigin(std::shared_ptr<GameObject_t>  & entity, const Vec2_t & move) 
 	entity->bounds.y += dy;
 	entity->center.x += nearbyintf(move.x);
 	entity->center.y += nearbyintf(move.y);
+	int derp = 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -1351,28 +1318,6 @@ void GetGroupSeparation(std::vector<std::shared_ptr<GameObject_t>> & areaContent
 // END FREEHILL flocking test
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-//***************
-// TranslateRect
-// dynamic pathfinding utility
-//***************
-SDL_Rect TranslateRect(const SDL_Rect & target, const Vec2_t & v) {
-	return SDL_Rect {	(int)nearbyintf(target.x + v.x),
-						(int)nearbyintf(target.y + v.y),
-						target.w,
-						target.h	};
-}
-
-//***************
-// TranslateSelf
-// dynamic pathfinding utility
-//***************
-void TranslateSelf(SDL_Rect & target, const Vec2_t & v) {
-	target = {	(int)nearbyintf(target.x + v.x),
-				(int)nearbyintf(target.y + v.y),
-				target.w,
-				target.h };
-}
-
 //******************
 // Rotate
 // expanded and factored version of:
@@ -1419,6 +1364,45 @@ float Minimize(const float & a, const float & b) {
 }
 
 //***************
+// GetSurfaceNormal
+// DEBUG: disregards collision
+//***************
+Vec2_t GetSurfaceNormal(const SDL_Rect & a, const SDL_Rect & b, const Vec2_t & va, const Vec2_t & vb) {
+	Vec2_t normal = vec2zero;
+	Vec2_t aMin = { (float)a.x, (float)a.y };
+	Vec2_t aMax = { (float)(a.x + a.w), (float)(a.y + a.h) };
+	Vec2_t bMin = { (float)b.x, (float)b.y };
+	Vec2_t bMax = { (float)(b.x + b.w), (float)(b.y + b.h) };
+	Vec2_t relativeV = va - vb;
+
+	for (int i = 0; i < 2; i++) {
+		if (relativeV[i] <= 0.0f) {
+//			if (aMax[i] < bMin[i]) /* does nothing, yet */;
+			if (bMax[i] <= aMin[i]) normal[i] = 1.0f;
+//			if (aMax[i] > bMin[i])	/* does nothing, yet */;
+		}
+		if (relativeV[i] > 0.0f) {
+//			if (aMin[i] > bMax[i]) /* does nothing, yet */;
+			if (aMax[i] <= bMin[i]) normal[i] = -1.0f;
+//			if (bMax[i] > aMin[i]) /* does nothing, yet */;
+		}
+	}
+	return normal;
+}
+
+//***************
+// TranslateRect
+// dynamic pathfinding utility
+//***************
+SDL_Rect TranslateRect(const SDL_Rect & src, const Vec2_t translation) {
+	return SDL_Rect {	(int)nearbyintf(src.x + translation.x), 
+						(int)nearbyintf(src.y + translation.y), 
+						src.w, 
+						src.h };
+}
+
+
+//***************
 // BroadPhaseAABB
 // dynamic pathfinding utility
 // Broad-phase moving AABB-AABB collision test utility
@@ -1454,20 +1438,18 @@ bool AABBAABBTest(const SDL_Rect & a, const SDL_Rect & b) {
 // MovingAABBAABBTest
 // dynamic pathfinding utility
 // AABB-AABB collision test where both are moving
-// returns 0 if already in collision
-// returns 1 if no collision will occur
+// returns true if already in collision
+// returns false if no collision will occur
 // otherwise returns the fraction along the movement
 // where collision first occurs
 //***************
-float MovingAABBAABBTest(const SDL_Rect & a, const SDL_Rect & b, const Vec2_t & va, const Vec2_t & vb, Vec2_t & collisionNormal) {
+bool MovingAABBAABBTest(const SDL_Rect & a, const SDL_Rect & b, const Vec2_t & va, const Vec2_t & vb, Vec2_t & times) {
 
 	// started in collision
-	// FIXME/BUG: this quick-out ignores relative velocity
-	// in determining the proper collision normal
-//	if (AABBAABBTest(a, b)) {
-//		collisionNormal = vec2zero;		// FIXME: this should be based on relative velocity and displacement
-//		return 0.0f;
-//	}
+	if (AABBAABBTest(a, b)) {
+		times = vec2zero;
+		return true;
+	}
 
 	// FIXME/BUG: the collision normal is not computed if the entity walked exactly up to the obstacle as to touch it this frame
 	// then NEXT frame its right on it, so NONE of the if conditions execute
@@ -1476,49 +1458,30 @@ float MovingAABBAABBTest(const SDL_Rect & a, const SDL_Rect & b, const Vec2_t & 
 	Vec2_t aMax = { (float)(a.x + a.w), (float)(a.y + a.h) };
 	Vec2_t bMin = { (float)b.x, (float)b.y };
 	Vec2_t bMax = { (float)(b.x + b.w), (float)(b.y + b.h) };
-	Vec2_t relativeV = va - vb;
-	float tFirst = 0.0f;
-	float tLast = 1.0f;
-	collisionNormal = vec2zero;
+	Vec2_t relativeV = va;// -vb;		// FIXME/DEBUG: fully kinematic simulation with non-simultaneous motion doesn't need relative velocity
+	times.x = 0.0f;	// DEBUG: tFirst
+	times.y = 1.0f;	// DEBUG: tLast
 
 	// determine times of first and last contact, if any
 	for (int i = 0; i < 2; i++) {
 		if (relativeV[i] < 0.0f) {
-			if (aMax[i] <= bMin[i]) {	// non-intersecting and moving apart
-				collisionNormal = vec2zero;
-				return 1.0f;
-			}
-			if (bMax[i] <= aMin[i]) { 
-				tFirst = Maximize((bMax[i] - aMin[i]) / relativeV[i], tFirst);
-				collisionNormal[i] = 1.0f;
-			}
-			if (aMax[i] >= bMin[i]) {
-				tLast = Minimize((bMin[i] - aMax[i]) / relativeV[i], tLast);
-			}
+			if (aMax[i] < bMin[i]) return false; // non-intersecting and moving apart
+			if (bMax[i] < aMin[i]) times.x = Maximize((bMax[i] - aMin[i]) / relativeV[i], times.x);
+			if (aMax[i] > bMin[i]) times.y = Minimize((bMin[i] - aMax[i]) / relativeV[i], times.y);
 		}
 		if (relativeV[i] > 0.0f) {
-			if (aMin[i] >= bMax[i]) {	// non-intersecting and moving apart
-				collisionNormal = vec2zero;
-				return 1.0f;
-			}
-			if (aMax[i] <= bMin[i]) {
-				tFirst = Maximize((bMin[i] - aMax[i]) / relativeV[i], tFirst);
-				collisionNormal[i] = -1.0f;
-			}
-			if (bMax[i] >= aMin[i]) {
-				tLast = Minimize((bMax[i] - aMin[i]) / relativeV[i], tLast);
-			}
+			if (aMin[i] > bMax[i]) return false; // non-intersecting and moving apart
+			if (aMax[i] < bMin[i]) times.x = Maximize((bMin[i] - aMax[i]) / relativeV[i], times.x);
+			if (bMax[i] > aMin[i]) times.y = Minimize((bMax[i] - aMin[i]) / relativeV[i], times.y);
 		}
+		
+		// generally, too far away to make contact
+		// DEBUG: if tFirst == tLast == 1.0f then this function returns true (a collision will occur)
+		// however, tFirst can also wind up as 0.0f but this function returns false, so tFirst ISN'T the final decider of collision
+		if (times.x > times.y)
+			return false;
 	}
-	
-	// too far away to make contact
-	// FIXME/BUG: possibly move this out of the for loop
-	if (tFirst > tLast) {
-		collisionNormal = vec2zero;
-		return 1.0f;
-	}
-
-	return tFirst;
+	return true;
 }
 
 //***************
@@ -1537,7 +1500,6 @@ void CheckPathCell(std::shared_ptr<GameObject_t> & entity) {
 	}
 }
 
-
 //***************
 // CheckForwardCollision
 // returns the fraction along the current velocity where
@@ -1552,21 +1514,22 @@ float CheckForwardCollision(std::shared_ptr<GameObject_t> & self, const AreaCont
 	float nearest = 1.0f;
 	const Vec2_t selfMove = self->velocity * self->speed;
 	SDL_Rect broadPhaseBounds = GetBroadPhaseAABB(self);
+	SDL_Rect nextSelfBounds = TranslateRect(self->bounds, selfMove);
 
 	// entity check
 	collisionEntity.reset();
 	for (auto && entity : contents.entities) {
 
-		// broad-phase test first
-		if (AABBAABBTest(broadPhaseBounds, entity->bounds)) {
-			Vec2_t normal;
-			float fraction = MovingAABBAABBTest(self->bounds, entity->bounds, selfMove, entity->velocity * entity->speed, normal);
+		// broad-phase test first,
+		// then so a swept AABB test on the next n steps
+		Vec2_t times;
+		if (AABBAABBTest(broadPhaseBounds, entity->bounds) &&
+			MovingAABBAABBTest(nextSelfBounds, entity->bounds, selfMove, entity->velocity * entity->speed, times)) {
 
-			// only consider approaching collisions
-			if (fraction < nearest && (self->velocity * normal) < 0.0f) {
-				nearest = fraction;
-				collisionEntity = entity;
-			}
+			// DEBUG: don't even consider a move along a vector with ANY collision
+			collisionEntity = entity;
+			nearest = 0.0f;
+			break;
 		}
 	}
 
@@ -1574,15 +1537,13 @@ float CheckForwardCollision(std::shared_ptr<GameObject_t> & self, const AreaCont
 	for (auto && obstacle : contents.obstacles) {
 
 		// broad-phase test first
-		if (AABBAABBTest(broadPhaseBounds, *obstacle)) {
-			Vec2_t normal;
-			float fraction = MovingAABBAABBTest(self->bounds, *obstacle, selfMove, { 0.0f, 0.0f }, normal);
-
-			// only consider approaching collisions
-			if (fraction < nearest && (self->velocity * normal) < 0.0f) {
-				nearest = fraction;
+		// then so a swept AABB test on the next n steps
+		Vec2_t times;
+		if (AABBAABBTest(broadPhaseBounds, *obstacle) && 
+			MovingAABBAABBTest(nextSelfBounds, *obstacle, selfMove, { 0.0f, 0.0f }, times)) {
 				collisionEntity.reset();
-			}
+				nearest = 0.0f;
+				break;
 		}
 	}
 	return nearest;
@@ -1601,10 +1562,7 @@ float AvoidCollision(std::shared_ptr<GameObject_t> & self, const AreaContents_t 
 
 	Vec2_t desiredVelocity = self->velocity;
 
-	// FIXME/BUG: CheckForwardCollision works fine, but AvoidCollision messes with the fraction (ie from 0.5f to 1.0f)
-	// as it should, but then the velocity doesn't re-orient to that bestFraction direction
-
-	// rotated 90 degrees CW to setup for the 180 degree CCW sweep
+	// rotated 90 degrees CCW to setup for the 180 degree CW sweep
 	self->velocity = { -self->velocity.y, self->velocity.x };
 
 	float bestWeight = 0.0f;
@@ -1612,9 +1570,9 @@ float AvoidCollision(std::shared_ptr<GameObject_t> & self, const AreaContents_t 
 	Vec2_t bestVelocity = vec2zero;
 
 	// check a 180 degree forward arc maximizing movement along path
-	for (int angle = 0; angle < 180; angle++) {
+	for (int angle = 0; angle < 360; angle++) {
 		Rotate(CLOCKWISE, self->velocity);
-		float fraction = CheckForwardCollision(self, contents, collisionEntity);
+		float fraction = CheckForwardCollision(self, contents, collisionEntity);	// DEBUG: forced to either 0.0f or 1.0f
 		float weight = (self->velocity * desiredVelocity);
 
 		if (fraction > bestFraction || (fraction == bestFraction && weight > bestWeight)) {
@@ -1688,7 +1646,9 @@ void Walk(std::shared_ptr<GameObject_t> & entity) {
 				Vec2_t localGradient = { (float)(to.x - from.x), (float)(to.y - from.y) };
 				Normalize(localGradient);
 				entity->velocity = localGradient;
-			} else {
+			} else if (!entity->path.empty()) {	// !entity->onPath || entity->path.size() < 2
+				// FIXME/BUG: check if the path is empty again here
+				// ...or change CheckPathCell to not pop_back a waypoint
 				auto & currentWaypoint = entity->path.back()->center;
 				if (!CheckWaypointRange(entity)) {
 					Vec2_t waypointVec = {	(float)(currentWaypoint.x - entity->center.x),
@@ -1737,6 +1697,8 @@ void Walk(std::shared_ptr<GameObject_t> & entity) {
 			// pick a different trajectory if there's no way forward
 			// FIXME/BUG: because fraction reported is always > 0.0f the entity will always move
 			// which is probably why the entity walks straight into others (totally overlapping)
+			// FIXME: AvoidCollision() sets the velocity regardless of the fraction
+			// however fraction SHOULD stop it if its 0.0f (note: not the main issue)
 			if (entity->velocity != vec2zero)
 				fraction = AvoidCollision(entity, areaContents);
 			move = entity->velocity * entity->speed * fraction;// *((float)frameTime / 1000.0f);

@@ -10,12 +10,13 @@
 #include <ios>
 #include <fstream>
 #include <random>
-#include <limits>
+//#include <limits>
+//#include <queue>
 #include <math.h>
+
 #include <unordered_map>
 #include <array>
-#include <algorithm>
-#include <queue>
+#include <algorithm>		// std::make_heap
 
 #define BIT(x) 1 << x
 #define DEG2RAD(angle) ( angle * ((float)(M_PI)/180.0f) )
