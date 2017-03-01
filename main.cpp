@@ -1228,7 +1228,7 @@ void UpdateOrigin(std::shared_ptr<GameObject_t>  & entity, const Vec2_t & move) 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 // BEGIN FREEHILL flocking test
-
+/*
 //***************
 // GetGroupAlignment
 // flocking utility
@@ -1314,7 +1314,7 @@ void GetGroupSeparation(std::vector<std::shared_ptr<GameObject_t>> & areaContent
 	result.y /= -groupCount;
 	Normalize(result);
 }
-
+*/
 // END FREEHILL flocking test
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1437,7 +1437,7 @@ bool AABBAABBTest(const SDL_Rect & a, const SDL_Rect & b) {
 //***************
 // MovingAABBAABBTest
 // dynamic pathfinding utility
-// AABB-AABB collision test where both are moving
+// AABB-AABB collision test where ONE is moving
 // returns true if already in collision
 // returns false if no collision will occur
 // otherwise returns the fraction along the movement
@@ -1570,7 +1570,7 @@ float AvoidCollision(std::shared_ptr<GameObject_t> & self, const AreaContents_t 
 	Vec2_t bestVelocity = vec2zero;
 
 	// check a 180 degree forward arc maximizing movement along path
-	for (int angle = 0; angle < 360; angle++) {
+	for (int angle = 0; angle < 180; angle++) {
 		Rotate(CLOCKWISE, self->velocity);
 		float fraction = CheckForwardCollision(self, contents, collisionEntity);	// DEBUG: forced to either 0.0f or 1.0f
 		float weight = (self->velocity * desiredVelocity);
@@ -1640,6 +1640,17 @@ void Walk(std::shared_ptr<GameObject_t> & entity) {
 			// head towards last waypoint if off-path,
 			// otherwise use the local gradient
 			CheckPathCell(entity);
+			areaContents.Update(entity->center, entity);
+
+///////////////////////////////////////////////////////////////////////////
+// BEGIN FREEHILL yielding cooperation test
+	// DEBUG: path.empty() may be true here because of CheckCellPath(entity)
+	// 1) yield to a collision entity (ie the closest one during CheckForwardCollision)....maybe
+	// 2) ???
+	// 3) profit.
+// END FREEHILL yielding cooperation test
+///////////////////////////////////////////////////////////////////////////
+
 			if (entity->onPath && entity->path.size() >= 2) {
 				auto & from = entity->path.at(entity->path.size() - 1)->center;
 				auto & to = entity->path.at(entity->path.size() - 2)->center;
@@ -1676,7 +1687,6 @@ void Walk(std::shared_ptr<GameObject_t> & entity) {
 // END FREEHILL flocking test
 
 			// stop moving if the path is crowded
-			areaContents.Update(entity->center, entity);
 			std::shared_ptr<GameObject_t> collisionEntity;
 			float fraction = CheckForwardCollision(entity, areaContents, collisionEntity);
 			if (fraction < 1.0f && collisionEntity) {
