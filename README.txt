@@ -10,9 +10,9 @@ left mouse click		set destination waypoint for selected units
 left mouse click on goodman	send missle towards goodman with selected blue units	
 space 				de-select units	
 
-![Debug Graphics Enabled for (1) Collision (2) Navigation Grid Occupancy (3) Navigation Waypoints](https://github.com/Dont-Be-a-Hero/graphics/DBaH_Debug_README.gif)
+![Debug Graphics Enabled for (1) Collision (2) Navigation Grid Occupancy (3) Navigation Waypoints](https://github.com/tmf7/Dont-Be-a-Hero/graphics/DBaH_Debug_README.gif)
 
-![Debug Graphics Disabled](https://github.com/Dont-Be-a-Hero/graphics/DBaH_NoDebug_README.gif)
+![Debug Graphics Disabled](https://github.com/tmf7/Dont-Be-a-Hero/graphics/DBaH_NoDebug_README.gif)
 
 All image assets are from opengameart.org.
 All sound assets were purchased from the Unity Asset store at https://www.assetstore.unity3d.com/en/#!/content/50235
