@@ -31,7 +31,7 @@ typedef enum {
 	DEBUG_DRAW_OCCUPANCY	= BIT(2)
 } DebugFlags_t;
 
-Uint16 debugState =  DEBUG_DRAW_PATH | DEBUG_DRAW_COLLISION;	// DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH | DEBUG_DRAW_OCCUPANCY;
+Uint16 debugState = 0;// DEBUG_DRAW_PATH | DEBUG_DRAW_COLLISION | DEBUG_DRAW_OCCUPANCY;	// DEBUG_DRAW_COLLISION | DEBUG_DRAW_PATH | DEBUG_DRAW_OCCUPANCY;
 
 //***************
 // DebugCheck
@@ -310,7 +310,7 @@ typedef struct AreaContents_s {
 								continue;
 
 							// DEBUG: don't add the same entity twice for those over multiple cells
-							auto & checkID = std::find(idList.begin(), idList.end(), entity->guid);
+							auto checkID = std::find(idList.begin(), idList.end(), entity->guid);
 							if (checkID == idList.end()) {
 								entities.push_back(entity);
 								idList.push_back(entity->guid);
@@ -724,7 +724,7 @@ bool LoadSprites() {
 void ClearCellReferences(std::shared_ptr<GameObject_t> & entity) {
 	// remove the entity from any gameGrid.cells its currently in
 	for (auto && cell : entity->cells) {
-		auto & index = std::find(cell->contents.begin(), cell->contents.end(), entity);
+		auto index = std::find(cell->contents.cbegin(), cell->contents.cend(), entity);
 		if (index != cell->contents.end())
 			cell->contents.erase(index);
 	}
@@ -893,15 +893,15 @@ void RemoveEntity(std::shared_ptr<GameObject_t> & entity) {
 	// DEBUG: test removal from groupSelection vector first to be sure even if it wasn't selected
 	// that the memory block is still in use to be tested (instead of getting a read-access error)
 	if (entity->selected) {
-		auto & index = std::find(groupSelection.begin(), groupSelection.end(), entity);
+		auto index = std::find(groupSelection.begin(), groupSelection.end(), entity);
 		groupSelection.erase(index);
 	}
 	
 	if (entity->type == OBJECTTYPE_MISSILE) {
-		auto & index = std::find(missiles.begin(), missiles.end(), entity);
+		auto index = std::find(missiles.begin(), missiles.end(), entity);
 		missiles.erase(index);
 	} else {
-		auto & index = std::find(entities.begin(), entities.end(), entity);
+		auto index = std::find(entities.begin(), entities.end(), entity);
 		entities.erase(index);
 	}
 }
@@ -1066,7 +1066,7 @@ GridCell_t & PointToCell(const SDL_Point & point) {
 // returns false if no valid path is found (also clears the current path)
 // returns true if a valid path was constructed (after clearing the current path)
 //***************
-bool PathFind(std::shared_ptr<GameObject_t> & entity, SDL_Point & start, SDL_Point & goal) {
+bool PathFind(std::shared_ptr<GameObject_t> & entity, const SDL_Point & start, const SDL_Point & goal) {
 
 	// DEBUG: static to prevent excessive dynamic allocation
 	static std::vector<GridCell_t *> openSet;
@@ -1828,7 +1828,7 @@ void SelectGroup(SDL_Point & first, SDL_Point & second) {
 						continue;
 
 					// DEBUG: don't add the same entity twice for those over multiple cells
-					auto & checkID = std::find(idList.begin(), idList.end(), entity->guid);
+					auto checkID = std::find(idList.begin(), idList.end(), entity->guid);
 					if (checkID == idList.end()) {
 						entity->selected = true;
 						entity->groupID = 4;		// TODO: random group number for now, but use available/forced group number tracking
@@ -1915,7 +1915,7 @@ int __stdcall WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLi
 
 						// check for an attack on goodman
 						auto & cell = PointToCell(second);
-						auto & findGoodman = std::find_if(	cell.contents.begin(),
+						auto findGoodman = std::find_if(	cell.contents.begin(),
 															cell.contents.end(),
 															[](auto && entity) {
 															return entity->type == OBJECTTYPE_GOODMAN;
