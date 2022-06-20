@@ -2,6 +2,18 @@
 
 A quick a dirty 2D top-down swarming brawl game made as practice for Global Game Jam 2017.
 
+CONTROLS (context senstive)
+---------------------------
+left mouse click	 	select unit (except goodman, who is non-selectable)
+left mouse click-and-drag	select multiple units at once
+left mouse click		set destination waypoint for selected units
+left mouse click on goodman	send missle towards goodman with selected blue units	
+space 				de-select units	
+
+![Debug Graphics Enabled for (1) Collision (2) Navigation Grid Occupancy (3) Navigation Waypoints](https://github.com/Dont-Be-a-Hero/graphics/DBaH_Debug_README.gif)
+
+![Debug Graphics Disabled](https://github.com/Dont-Be-a-Hero/graphics/DBaH_NoDebug_README.gif)
+
 All image assets are from opengameart.org.
 All sound assets were purchased from the Unity Asset store at https://www.assetstore.unity3d.com/en/#!/content/50235
 All font assets are from http://all-free-download.com/font/sort-by-popular/page/3/ [ Levi Brush	author: Levi Szekeres ]
