@@ -1,6 +1,6 @@
 # Don't Be a Hero
 
-A quick a dirty 2D top-down swarming brawl game made as practice for Global Game Jam 2017.  
+A quick a dirty 2D top-down swarming brawl game made as practice for Global Game Jam 2017. Written purely in C++ using [SDL](https://www.libsdl.org/).  
 ***[It's one big main.cpp file](/main.cpp)***, but don't take that as an endorsement of such heresy. I coded most of this in one day and was excercising my code readability muscles.
 
 ## CONTROLS (context senstive)
