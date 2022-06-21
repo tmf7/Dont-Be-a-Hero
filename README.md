@@ -1,6 +1,7 @@
 # Don't Be a Hero
 
-A quick a dirty 2D top-down swarming brawl game made as practice for Global Game Jam 2017. It's one big file, but don't take that as an endorsement of such heresy. I coded most of this in one day and was excercising my code readability muscles.
+A quick a dirty 2D top-down swarming brawl game made as practice for Global Game Jam 2017. ***[It's one big main.cpp file](/main.cpp)***,  
+but don't take that as an endorsement of such heresy. I coded most of this in one day and was excercising my code readability muscles.
 
 ## CONTROLS (context senstive)
 	left mouse click		select unit (except goodman, who is non-selectable)  
