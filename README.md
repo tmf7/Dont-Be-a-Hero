@@ -20,7 +20,7 @@ A quick a dirty 2D top-down swarming brawl game made as practice for Global Game
 ![No Debug graphics gameplay](/graphics/DBaH_NoDebug_README.gif)
 
 ## Assets
-All image assets are from [opengameart.org](https://opengameart.org/) 
+All image assets are from [opengameart.org](https://opengameart.org/)  
 All sound assets were purchased from the Unity Asset store at https://www.assetstore.unity3d.com/en/#!/content/50235  
 All font assets are from http://all-free-download.com/font/sort-by-popular/page/3/ [Levi Brush	author: Levi Szekeres]  
 
